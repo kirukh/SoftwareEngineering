@@ -3,8 +3,11 @@
 Objekterkennung über Kamera + KI auf dem Raspberry Pi 5 + Hailo-8.
 Stellt dem Controller eine HTTP-API bereit, die kontinuierlich Tracking-Ergebnisse
 liefert ("Dauerfeuer"). Controller pollt das aktuelle aggregierte Ergebnis.
+Zusätzlich gibt es einen MJPEG-Live-Stream (`GET /stream`) mit eingezeichneten
+Bounding-Boxen, den das Audio-Team in seine Oberfläche einbetten kann.
 
 **Quick Start für Controller-Team:** siehe [`Anleitung.md`](Anleitung.md).
+**Lokal testen (ohne Pi):** siehe [`TESTING.md`](TESTING.md).
 
 ## Architektur
 
@@ -17,10 +20,11 @@ liefert ("Dauerfeuer"). Controller pollt das aktuelle aggregierte Ergebnis.
   POST /track/stop  ───▶│  visual.stop_tracking()          │
   GET  /health      ───▶│  status + aktiver Detector       │
                         │                                  │
-                        │  Hintergrund-Thread:             │
-                        │  Detector.stream() → on_frame ───┼──▶ Sliding Window
-                        │                                  │    (8 Frames)
-                        └──────────────────────────────────┘
+  Audio-Team            │  Hintergrund-Thread:             │
+  ─────────             │  Detector.stream() → on_frame ───┼──▶ Sliding Window
+  GET  /stream      ───▶│         │                        │    (8 Frames)
+                        │         └─ annotierter Frame ────┼──▶ FrameBuffer
+                        └──────────────────────────────────┘    (letztes JPEG)
                                        │
                                        ▼
                           ┌─────────────────────────┐
@@ -36,27 +40,23 @@ mind. M Treffern (Default 5) → `found=True` mit Mittelwerten von
 `confidence`, `x`, `y`, `w`, `h`. Sonst `found=False` mit allen Koordinaten
 auf `null`.
 
+Derselbe Detector legt zusätzlich pro Frame das **annotierte Kamerabild**
+(Boxen eingezeichnet, JPEG-kodiert) in einen thread-sicheren `FrameBuffer`.
+Der `/stream`-Endpoint liest nur aus diesem Puffer — er öffnet keine eigene
+Kamera. Ein Detector, eine Kamera, zwei Ausgänge (`/track/latest` + `/stream`).
+
 ## Konfiguration
 
 Alle Parameter liegen in `config.py` als `VisualConfig`-Dataclass.
 
-**Zwei Ebenen, später hat Vorrang:**
-1. Defaults im Code (`config.py`)
-2. Umgebungsvariablen (zum kurzfristigen Überschreiben)
+**Drei Ebenen, später hat Vorrang:**
+1. Defaults im Code
+2. `config.yaml` im Repo-Root (optional, braucht PyYAML)
+3. Umgebungsvariablen
 
 Aktive Werte anzeigen:
 ```bash
 python config.py
-```
-
-Beispielausgabe:
-```
-Aktive Visual-Konfiguration:
-  host                      = '127.0.0.1'                (Env: VISUAL_HOST)
-  port                      = 7995                       (Env: VISUAL_PORT)
-  detector_mode             = ''                         (Env: VISUAL_DETECTOR)
-  confidence_min            = 0.5                        (Env: VISION_CONFIDENCE_MIN)
-  ...
 ```
 
 | Feld | Default | Env-Variable | Bedeutung |
@@ -70,11 +70,15 @@ Aktive Visual-Konfiguration:
 | `camera_index` | `0` | `VISION_CAMERA_INDEX` | Webcam-Index (nur YOLO) |
 | `model_path` | `yolov8n.pt` | `VISION_MODEL_PATH` | YOLO-Modell-Pfad |
 | `stop_timeout_seconds` | `5.0` | `VISION_STOP_TIMEOUT_SECONDS` | Wait beim Tracking-Stop |
+| `stream_jpeg_quality` | `80` | `VISION_STREAM_JPEG_QUALITY` | JPEG-Qualität für `/stream` (1–100) |
+| `stream_fps` | `15` | `VISION_STREAM_FPS` | Max. Frames/s, die `/stream` ausliefert |
 
-**Werte dauerhaft ändern:** direkt in `config.py` editieren.
-**Werte für einen einzelnen Lauf ändern:** Env-Variable vor dem Aufruf setzen, z.B.
+**`config.yaml` nutzen:**
 ```bash
-VISUAL_PORT=7996 python server.py
+cp config.yaml.example config.yaml
+pip install pyyaml          # falls noch nicht da
+# edit config.yaml as desired
+python server.py
 ```
 
 ## HTTP-API
@@ -111,10 +115,38 @@ Response: {"status": "ok", "detector": "hailo"}
 `detector` kann `"hailo"`, `"yolo"` oder `"none"` (vor Prewarm) sein —
 hilfreich um zu sehen, ob im Auto-Modus der Fallback gegriffen hat.
 
+### `GET /stream`
+
+MJPEG-Live-Stream der annotierten Kamerabilder (Bounding-Boxen, Labels und
+Confidence eingezeichnet). Content-Type `multipart/x-mixed-replace`.
+
+```
+http://<pi-ip>:7995/stream
+```
+
+Verhalten:
+- **Boxen/Bewegung erscheinen nur, wenn Tracking aktiv ist** (`POST /track/start`).
+  Ohne aktives Tracking sendet der Stream ein graues Platzhalterbild — die
+  Verbindung bleibt offen, reißt also nicht ab.
+- Im **Browser** direkt einbettbar: `<img src="http://<pi-ip>:7995/stream">`.
+- In **Tkinter** (Audio-Team) ist *kein* natives Rendering möglich — der
+  Multipart-Stream muss in einem Hintergrund-Thread selbst geparst werden.
+  Fertige Vorlage: [`tkinter_stream_example.py`](tkinter_stream_example.py).
+
+> ⚠️ **Stand des Stream-Features (wichtig):**
+> Der `/stream`-Endpoint ist mit dem **YOLO-Detector vollständig getestet**
+> (Laptop + Webcam). Der **Hailo-Pfad ist ein Entwurf und noch nicht am Pi
+> verifiziert** — der Abgriff des annotierten Frames aus der GStreamer-Pipeline
+> hängt am offenen Sprint-Task **T-20**. Läuft der Server unter Hailo, *kann*
+> der Stream leer bleiben (graues Platzhalterbild), bis T-20 abgeschlossen ist.
+> Das **Tracking** (`/track/*`) ist davon nicht betroffen und läuft mit Hailo
+> wie gewohnt.
+
 ## Server starten
 
+Linux / macOS:
 ```bash
-# Auto-Detector (Hailo wenn verfügbar, sonst YOLO) — Default
+# Auto-Detector (Hailo wenn verfügbar, sonst YOLO)
 python server.py
 
 # YOLO-Webcam erzwingen (Laptop ohne Hailo)
@@ -126,6 +158,33 @@ VISUAL_DETECTOR=hailo python server.py
 # Netzwerk-Zugriff von anderen Geräten erlauben
 VISUAL_HOST=0.0.0.0 python server.py
 ```
+
+Windows (PowerShell):
+```powershell
+# Auto-Detector
+python server.py
+
+# YOLO-Webcam erzwingen
+$env:VISUAL_DETECTOR="yolo"
+python server.py
+
+# Hailo erzwingen
+$env:VISUAL_DETECTOR="hailo"
+python server.py
+
+# Netzwerk-Zugriff von anderen Geräten erlauben
+$env:VISUAL_HOST="0.0.0.0"
+python server.py
+```
+
+Windows (cmd):
+```cmd
+set VISUAL_DETECTOR=yolo
+python server.py
+```
+
+> Hinweis Windows: Env-Variablen gelten nur für die aktuelle Terminal-Sitzung.
+> In PowerShell `$env:NAME="wert"`, in cmd `set NAME=wert` — nicht verwechseln.
 
 ## Fallback-Verhalten
 
@@ -163,12 +222,17 @@ with VisualClient() as visual:
 
 ## Tests
 
+Linux / macOS:
 ```bash
 python config.py                 # aktive Config anzeigen
 python test_visual.py            # Fake-Tests, ohne Hardware
 python test_visual.py --server   # zusätzlich HTTP-Endpoints (mit Fake)
 python live_e2e_test.py          # interaktiver Webcam-Test (YOLO), Default cell phone 30s
 ```
+
+Windows (PowerShell): identische Befehle, nur `python` ggf. als `py`.
+Ausführliche Schritt-für-Schritt-Anleitung zum lokalen Testen (inkl.
+`/stream`): siehe [`TESTING.md`](TESTING.md).
 
 ## Architektur-Entscheidung: HTTP-Server (Sprint 2)
 
@@ -192,7 +256,9 @@ Optionen waren:
 | FR-04 | Ergebnis mit `name`, `found`, `confidence`, `x`, `y`, `w`, `h` zurückgeben |
 | FR-05 | Sliding-Window-Aggregation über N Frames für stabile Ausgabe |
 | FR-06 | Auto-Fallback Hailo → YOLO, damit Rollout auch ohne funktionierendes AI Kit läuft |
-| FR-07 | Zentrale Konfiguration (`config.py`) mit Env-Override |
+| FR-07 | Zentrale Konfiguration (`config.py`) mit Env-Override und optional YAML |
+| FR-08 | MJPEG-Live-Stream (`/stream`) mit eingezeichneten Boxen — *YOLO getestet, Hailo offen (T-20)* |
 | ITF-01 | HTTP-API: `POST /track/start`, `GET /track/latest`, `POST /track/stop` |
 | ITF-02 | JSON-Antworten, Pydantic-validiert |
 | ITF-03 | `GET /health` liefert aktiven Detector zurück (zum Debuggen) |
+| ITF-04 | `GET /stream` liefert MJPEG-Multipart-Stream für die Bildanzeige |

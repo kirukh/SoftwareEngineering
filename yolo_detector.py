@@ -1,4 +1,9 @@
-"""YoloDetector — DetectorProtocol-Implementierung mit YOLOv8 + Webcam."""
+"""YoloDetector — DetectorProtocol-Implementierung mit YOLOv8 + Webcam.
+
+Zusätzlich zum VisionResult pro Frame schreibt der Detector den jeweils
+letzten ANNOTIERTEN Frame (Boxen eingezeichnet, JPEG-kodiert) in den
+gemeinsamen FRAME_BUFFER. Der /stream-Endpoint liest von dort.
+"""
 from __future__ import annotations
 
 import threading
@@ -8,6 +13,7 @@ import cv2
 from ultralytics import YOLO
 
 from config import CONFIG
+from frame_buffer import FRAME_BUFFER
 from visual_interface import FrameCallback, VisionResult
 
 # Hinweis: Der Controller liefert immer bereits korrekte COCO-Labels
@@ -51,7 +57,8 @@ class YoloDetector:
                 results = model.predict(
                     frame, conf=CONFIG.confidence_min, verbose=False, imgsz=640
                 )
-                match = _best_match(results[0], names, target)
+                result = results[0]
+                match = _best_match(result, names, target)
 
                 if match is None:
                     on_frame(VisionResult(object_name, False, 0.0))
@@ -63,8 +70,33 @@ class YoloDetector:
                         round(x, 4), round(y, 4),
                         round(w, 4), round(h, 4),
                     ))
+
+                # --- Annotierten Frame für den /stream-Endpoint ablegen ---
+                # result.plot() rendert ALLE erkannten Objekte mit Box,
+                # Label und Confidence in ein BGR-Array. Das zeigt auch
+                # andere COCO-Objekte, nicht nur das gesuchte — fürs
+                # Debuggen/Demo gewollt. Wenn nur das Zielobjekt gezeigt
+                # werden soll, müsste man hier manuell filtern und zeichnen.
+                _publish_frame(result)
         finally:
             cap.release()
+            # Beim Stop den Puffer leeren, damit der Stream nicht ein
+            # eingefrorenes altes Bild weiterzeigt.
+            FRAME_BUFFER.clear()
+
+
+def _publish_frame(result) -> None:
+    """Annotierten Frame zu JPEG kodieren und in den FRAME_BUFFER legen."""
+    try:
+        annotated = result.plot()  # BGR-ndarray mit Boxen/Labels/Confidence
+        ok, buf = cv2.imencode(
+            ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG.stream_jpeg_quality]
+        )
+        if ok:
+            FRAME_BUFFER.set_frame(buf.tobytes())
+    except Exception as e:
+        # Ein fehlgeschlagener Frame darf das Tracking nicht abbrechen.
+        print(f"[yolo] Frame-Encoding fehlgeschlagen: {e}")
 
 
 def _best_match(result, names: dict, target: str):

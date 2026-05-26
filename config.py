@@ -3,7 +3,8 @@ config.py — Zentrale Konfiguration für das Visual-Modul.
 
 Auflösungsreihenfolge (späteres überschreibt früheres):
     1) Defaults aus dem Code (sicher, immer da)
-    2) Umgebungsvariablen (VISUAL_*, VISION_*)
+    2) config.yaml im Repo-Root, falls vorhanden und PyYAML installiert
+    3) Umgebungsvariablen (VISUAL_*, VISION_*)
 
 Aufruf:
     from config import CONFIG
@@ -11,18 +12,12 @@ Aufruf:
 
 Aktive Werte ausgeben (zum Debuggen):
     python config.py
-
-Defaults sind so gewählt, dass der Server auf dem Pi out-of-the-box läuft:
-- detector_mode = ""  → Auto: probiert Hailo, fällt bei jedem Fehler auf YOLO
-  zurück. Damit ist der Sprint-3-Rollout abgesichert, selbst wenn das
-  Hailo-Kit zur Laufzeit hakt.
-- port = 7995         → mittlere Position der Visual-Range 7991–8000
-  (Festlegung Prof. Jehle).
 """
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, fields, asdict
+from pathlib import Path
 from typing import Any
 
 
@@ -36,14 +31,11 @@ class VisualConfig:
     """
 
     # --- Server ---
-    host: str = "127.0.0.1"      # 0.0.0.0 für Netzwerk-Zugriff von anderen Geräten
+    host: str = "127.0.0.1"      # 0.0.0.0 für Netzwerk-Zugriff
     port: int = 7995             # in Range 7991–8000
 
     # --- Detector-Wahl ---
-    # "" = Auto (Hailo bevorzugt, Fallback YOLO) — Default für Pi-Rollout.
-    # "hailo" = nur Hailo, kein Fallback (für Performance-Messungen).
-    # "yolo"  = nur YOLO + Webcam (Laptop-Tests).
-    detector_mode: str = ""
+    detector_mode: str = ""      # "" (auto), "hailo", "yolo"
 
     # --- Detection-Parameter ---
     confidence_min: float = 0.5  # pro Frame
@@ -56,6 +48,10 @@ class VisualConfig:
 
     # --- Timing ---
     stop_timeout_seconds: float = 5.0  # Wait beim Tracking-Stop
+
+    # --- MJPEG-Stream (/stream-Endpoint) ---
+    stream_jpeg_quality: int = 80  # JPEG-Qualität 1–100 (höher = größer)
+    stream_fps: int = 15           # max. Frames/s, die /stream ausliefert
 
     def validate(self) -> None:
         """Plausibilitäts-Checks. Wirft ValueError bei Quatsch."""
@@ -82,12 +78,17 @@ class VisualConfig:
             raise ValueError(f"camera_index={self.camera_index} muss >= 0 sein")
         if self.stop_timeout_seconds <= 0:
             raise ValueError(f"stop_timeout_seconds={self.stop_timeout_seconds} muss > 0 sein")
+        if not (1 <= self.stream_jpeg_quality <= 100):
+            raise ValueError(
+                f"stream_jpeg_quality={self.stream_jpeg_quality} muss in [1, 100] liegen"
+            )
+        if self.stream_fps < 1:
+            raise ValueError(f"stream_fps={self.stream_fps} muss >= 1 sein")
 
 
-# ------------------------------------------------------------------ Env-Mapping
+# ------------------------------------------------------------------ Quellen-Mapping
 
-# Feldname → Env-Variable. Praktisch zum kurzfristigen Überschreiben:
-#   VISUAL_PORT=7996 python server.py
+# Feldname → Env-Variable (Backwards-Kompatibilität mit bestehenden Env-Vars).
 _ENV_MAP: dict[str, str] = {
     "host": "VISUAL_HOST",
     "port": "VISUAL_PORT",
@@ -98,6 +99,8 @@ _ENV_MAP: dict[str, str] = {
     "camera_index": "VISION_CAMERA_INDEX",
     "model_path": "VISION_MODEL_PATH",
     "stop_timeout_seconds": "VISION_STOP_TIMEOUT_SECONDS",
+    "stream_jpeg_quality": "VISION_STREAM_JPEG_QUALITY",
+    "stream_fps": "VISION_STREAM_FPS",
 }
 
 
@@ -114,12 +117,52 @@ def _coerce(value: Any, target_type: type) -> Any:
     return str(value)
 
 
+def _load_yaml(path: Path) -> dict[str, Any]:
+    """config.yaml lesen, wenn vorhanden und PyYAML da ist. Sonst {}."""
+    if not path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        print(f"[config] {path.name} gefunden, aber PyYAML nicht installiert — wird ignoriert.")
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        print(f"[config] {path.name} konnte nicht gelesen werden: {e} — wird ignoriert.")
+        return {}
+    if not isinstance(data, dict):
+        print(f"[config] {path.name}: Top-Level muss ein Mapping sein, ist {type(data).__name__} — ignoriert.")
+        return {}
+    # Optional: unter 'visual:' verschachtelt, falls die Datei später team-übergreifend wird.
+    if "visual" in data and isinstance(data["visual"], dict):
+        return data["visual"]
+    return data
+
+
 # ------------------------------------------------------------------ Build
 
-def load_config() -> VisualConfig:
-    """Config zusammenbauen: Defaults < Env-Variablen."""
+def load_config(yaml_path: Path | None = None) -> VisualConfig:
+    """Config zusammenbauen: Defaults < YAML < Env."""
     cfg = VisualConfig()
+    field_types = {f.name: f.type for f in fields(cfg)}
 
+    # 1) YAML-Layer
+    yaml_file = yaml_path or (Path(__file__).parent / "config.yaml")
+    yaml_data = _load_yaml(yaml_file)
+    for name, value in yaml_data.items():
+        if name not in field_types:
+            print(f"[config] Unbekanntes Feld in {yaml_file.name}: {name!r} — ignoriert.")
+            continue
+        # type-string in echten Typ auflösen ist tricky; nutzen Default-Wert als Hinweis
+        default_val = getattr(cfg, name)
+        try:
+            setattr(cfg, name, _coerce(value, type(default_val)))
+        except (ValueError, TypeError) as e:
+            print(f"[config] YAML-Wert für {name}={value!r} ungültig: {e} — Default beibehalten.")
+
+    # 2) Env-Layer
     for name, env_var in _ENV_MAP.items():
         raw = os.environ.get(env_var)
         if raw is None:
@@ -128,7 +171,7 @@ def load_config() -> VisualConfig:
         try:
             setattr(cfg, name, _coerce(raw, type(default_val)))
         except (ValueError, TypeError) as e:
-            print(f"[config] Env {env_var}={raw!r} ungültig: {e} — Default beibehalten.")
+            print(f"[config] Env {env_var}={raw!r} ungültig: {e} — vorigen Wert beibehalten.")
 
     # detector_mode normalisieren (lower, leerstring statt None)
     cfg.detector_mode = (cfg.detector_mode or "").strip().lower()

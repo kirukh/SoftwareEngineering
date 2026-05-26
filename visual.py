@@ -20,6 +20,7 @@ import threading
 from collections import deque
 
 from config import CONFIG
+from frame_buffer import FRAME_BUFFER
 from visual_interface import DetectorProtocol, VisionResult
 
 
@@ -208,6 +209,9 @@ def _run_stream(detector: DetectorProtocol, name: str, stop_event: threading.Eve
         print(f"[visual] Stream-Fehler: {e}")
         with _window_lock:
             _window.clear()
+        # Stream-Frames für /stream ebenfalls verwerfen — sonst zeigt der
+        # MJPEG-Stream nach einem Crash ein eingefrorenes altes Bild.
+        FRAME_BUFFER.clear()
 
 
 def get_latest() -> dict:
@@ -242,3 +246,8 @@ def _stop_locked() -> None:
     _current_name = None
     with _window_lock:
         _window.clear()
+    # Frame-Puffer leeren, damit /stream nach dem Stop nicht ein
+    # eingefrorenes Bild weiterzeigt. Der Detector macht das in seinem
+    # finally-Block auch selbst — hier doppelt, falls join() in den
+    # Timeout läuft und der Detector-Thread noch nicht durch ist.
+    FRAME_BUFFER.clear()
