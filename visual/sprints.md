@@ -12,11 +12,117 @@
 |--------|----------|------|--------|
 | Sprint 1 | KW 17 – KW 18 | `search()` mit Hailo + YOLO-Fallback | ✅ Done |
 | Sprint 2 | KW 18 – KW 19 | Tracking-Server mit Sliding-Window-Aggregation | ✅ Done |
-| Sprint 3 | KW 19 – KW 20 | Full Rollout auf dem Pi + End-to-End mit allen Teams | 🔄 In Progress |
+| Sprint 3 | KW 19 – KW 20 | Full Rollout auf dem Pi + End-to-End mit allen Teams | ✅ Done |
+| Sprint 4 | KW 20 – KW 21 | MJPEG-Live-Stream mit eingezeichneten Boxen | 🔄 In Progress |
 
 ---
 
-## Sprint 3 (aktuell)
+## Sprint 4 (aktuell)
+
+**Zeitraum:** KW 20 – KW 21 (12.05.2026 – 18.05.2026)
+
+### Sprint Goal
+**Bildübertragung ans Audio-Team**: Der Visual-Server stellt einen
+MJPEG-Live-Stream (`GET /stream`) bereit, der das Kamerabild mit
+eingezeichneten Bounding-Boxen, Labels und Confidence-Werten zeigt.
+Das Audio-Team kann diesen Stream in seine Oberfläche einbetten — eine
+gesuchte Person, die durchs Bild läuft, bekommt im Live-Video eine Box,
+die ihr folgt.
+
+### Architektur-Entscheidungen im Sprint
+
+1. **Ein Detector, zwei Ausgänge.** Der laufende Detector produziert pro
+   Frame weiterhin das `VisionResult` fürs Tracking — und legt zusätzlich
+   das annotierte Kamerabild (JPEG) in einen thread-sicheren `FrameBuffer`.
+   `/track/latest` und `/stream` lesen beide aus derselben Quelle. Kein
+   zweiter Detector, keine zweite Kamera.
+2. **`FrameBuffer` als Entkopplung.** Kamera und Detector greifen exklusiv
+   auf die Hardware zu — `/stream` darf deshalb keine eigene Kamera öffnen.
+   Der Detector schreibt in den Puffer, der HTTP-Endpoint liest nur. Der
+   Puffer hält immer nur den neuesten Frame (für einen Live-View reicht das).
+3. **MJPEG statt SSE/WebSocket.** MJPEG (`multipart/x-mixed-replace`) ist im
+   Browser nativ einbettbar (`<img src>`) und bleibt konsistent mit der
+   HTTP-Linie der anderen Endpoints. Für Tkinter (Audio-Team) ist kein
+   natives Rendering möglich — dafür liefern wir `tkinter_stream_example.py`
+   als fertige Vorlage mit.
+4. **Boxen-Annotation pro Detector unterschiedlich.** YOLO: `result.plot()`
+   liefert das annotierte Bild direkt. Hailo: das Overlay-Element der
+   GStreamer-Pipeline brennt die Boxen ein, der annotierte Frame muss per
+   Pad-Probe abgegriffen werden. Der Hailo-Pfad ist code-complete, aber
+   noch nicht am Pi verifiziert (siehe offene Punkte).
+5. **Stream-Parameter in `config.py`.** `stream_jpeg_quality` (Default 80)
+   und `stream_fps` (Default 15) als neue Felder, per Env-Variable
+   überschreibbar — konsistent mit der bestehenden Config-Logik aus T-22.
+
+### User Stories
+
+| ID | Story | Akzeptanzkriterium | SP |
+|----|-------|--------------------|----|
+| US-14 | Visual stellt einen Live-Stream des Kamerabilds bereit. | `GET /stream` liefert einen MJPEG-Multipart-Stream. | 2 |
+| US-15 | Der Stream zeigt die erkannten Objekte mit Box. | Bei aktivem Tracking sind Bounding-Boxen, Label und Confidence im Bild eingezeichnet. | 3 |
+| US-16 | Das Audio-Team kann den Stream einbinden. | Browser-Embed dokumentiert; Tkinter-Vorlage (`tkinter_stream_example.py`) liegt im Repo und läuft. | 2 |
+| US-17 | Der Stream funktioniert mit beiden Detector-Backends. | Stream liefert annotierte Frames mit YOLO **und** Hailo. | 3 |
+
+**Gesamt: 10 Story Points**
+
+### Sprint Backlog
+
+| ID | Task | Story | SP | Status |
+|----|------|-------|----|--------|
+| T-23 | `FrameBuffer` (thread-sicherer JPEG-Puffer) | US-14 | 1 | ✅ Done |
+| T-24 | `GET /stream`-Endpoint in `server.py` (MJPEG-Generator) | US-14 | 1 | ✅ Done |
+| T-25 | `YoloDetector`: annotierten Frame via `result.plot()` in den Puffer | US-15/17 | 1 | ✅ Done |
+| T-26 | `HailoDetector`: Frame-Abgriff aus der GStreamer-Pipeline (Code) | US-15/17 | 2 | ✅ Code Done — Pi-Verifikation offen |
+| T-27 | Stream-Parameter in `config.py` (`stream_jpeg_quality`, `stream_fps`) | US-14 | 0.5 | ✅ Done |
+| T-28 | `tkinter_stream_example.py` als Vorlage fürs Audio-Team | US-16 | 1 | ✅ Done |
+| T-29 | Doku: `README.md`, `Anleitung.md`, neue `TESTING.md`, `changes.md` | US-16 | 1 | ✅ Done |
+| T-30 | Hailo-Stream am echten Pi verifizieren | US-17 | 2 | ⏳ Open |
+| T-31 | Integrationstest mit Audio- + Controller-Team (Stream im Audio-GUI) | US-16 | 1.5 | ⏳ Open |
+
+**Hinweis zu T-30:** Die Hailo-Verifikation des `/stream`-Endpoints hängt eng
+am Pi-Live-Test T-20 aus Sprint 3 (Hailo allgemein am Pi). Ob T-30 als
+Nachzug zu T-20 läuft oder ein eigenständiger Task bleibt, wird in der
+nächsten Planung entschieden — abhängig auch von der offenen Abstimmung
+mit Prof. Jehle (siehe offene Punkte).
+
+### Definition of Ready
+
+- Anforderung "Bildübertragung" vom Audio-Team gemeldet ✓
+- Audio-Team-UI-Stack bekannt (Tkinter, kein Browser) ✓
+- Detector-Abstraktion erlaubt Frame-Abgriff ohne zweite Kamera ✓
+
+### Definition of Done
+
+- `GET /stream` liefert einen MJPEG-Stream, im Browser einbettbar ✓
+- Stream zeigt bei aktivem Tracking eingezeichnete Boxen (YOLO getestet) ✓
+- Tkinter-Vorlage liegt im Repo und ist dokumentiert ✓
+- Doku aktualisiert (`README`, `Anleitung`, `TESTING`, `changes`) ✓
+- **Offen:** Hailo-Stream am Pi verifiziert (T-30)
+- **Offen:** Integrationstest mit Audio- + Controller-Team bestanden (T-31)
+
+### Offene Punkte / Risiken
+
+- **Hailo-Stream am Pi noch nicht verifiziert (T-30).** Der Frame-Abgriff
+  aus der GStreamer-Pipeline ist code-complete, aber ungetestet — Element-Name,
+  Pixelformat und Pad müssen am Gerät geprüft werden. Solange das offen ist,
+  funktioniert `/stream` nur mit YOLO sicher; unter Hailo *kann* der Stream
+  leer bleiben. Das **Tracking** ist davon nicht betroffen.
+- **Abstimmung mit Prof. Jehle ausstehend:** Ob der Stream zwingend über
+  Hailo laufen muss oder ob die Aufteilung "Tracking auf Hailo, Stream-Boxen
+  via YOLO" akzeptabel ist. Die Antwort entscheidet, wie dringend T-30 ist
+  und ob daraus ein eigener Task wird. Anfrage ist raus, Antwort steht aus.
+- **Integrationstest mit den anderen Teams offen (T-31).** Der Stream ist
+  bisher nur isoliert (Laptop, YOLO, Browser + Tkinter-Vorlage) getestet.
+  Der Test im echten Audio-GUI, zusammen mit Controller und Audio-Team,
+  steht noch aus — synchroner Termin nötig.
+- **Kamera-Exklusivität:** Hailo und YOLO greifen beide exklusiv auf die
+  Kamera zu. Für eine Stream-Demo auf YOLO läuft der gesamte Visual-Server
+  auf YOLO (Tracking inklusive) — Hailo und YOLO können nicht parallel
+  dieselbe Kamera nutzen. Beim Joint-Test einplanen.
+
+---
+
+## Sprint 3 — abgeschlossen
 
 **Zeitraum:** KW 19 – KW 20 (05.05.2026 – 11.05.2026)
 
@@ -73,6 +179,11 @@ funktionieren.
 | T-22 | Zentrale `config.py` (VisualConfig + Env-Override) | US-09/10 | 1 | ✅ Done |
 | T-20 | Pi-Live-Session: Hailo-Stream zum Laufen bringen | US-11 | 3 | ⏳ Open |
 | T-21 | Joint-Test mit Audio + Controller-Team | US-13 | 2.5 | ⏳ Open |
+
+> **Hinweis:** T-20 und T-21 wurden im Sprint nicht abgeschlossen und in
+> Sprint 4 weitergetragen. Der Sprint gilt als Done, weil das Sprint Goal
+> (Rollout läuft, Auto-Fallback abgesichert) erreicht war; die zwei
+> hardware-/teamabhängigen Tasks blieben als bekanntes Risiko offen.
 
 ### Definition of Ready
 
