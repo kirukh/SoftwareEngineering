@@ -16,12 +16,15 @@ zurück (Sprint-Ziel: Rollout muss laufen, auch wenn das Hailo-Kit hakt).
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 
 from config import CONFIG
 from frame_buffer import FRAME_BUFFER
 from visual_interface import DetectorProtocol, VisionResult
+
+log = logging.getLogger("visual.core")
 
 
 # ------------------------------------------------------------------ State
@@ -50,7 +53,7 @@ def _try_hailo() -> DetectorProtocol | None:
     try:
         from hailo_detector import HailoDetector, _hailo_available
     except Exception as e:
-        print(f"[visual] Hailo-Module nicht importierbar: {e}")
+        log.warning("Hailo-Module nicht importierbar: %s", e)
         return None
 
     if not _hailo_available:
@@ -59,7 +62,7 @@ def _try_hailo() -> DetectorProtocol | None:
     try:
         return HailoDetector()
     except Exception as e:
-        print(f"[visual] Hailo-Initialisierung fehlgeschlagen: {e}")
+        log.warning("Hailo-Initialisierung fehlgeschlagen: %s", e)
         return None
 
 
@@ -96,11 +99,11 @@ def _get_detector() -> DetectorProtocol:
             _detector = d
             _active_detector_name = "hailo"
         else:
-            print("[visual] Auto-Modus: Hailo nicht verfügbar, fallback auf YOLO.")
+            log.info("Auto-Modus: Hailo nicht verfügbar, fallback auf YOLO.")
             _detector = _try_yolo()
             _active_detector_name = "yolo"
 
-    print(f"[visual] {type(_detector).__name__} aktiv")
+    log.info("%s aktiv", type(_detector).__name__)
     return _detector
 
 
@@ -130,11 +133,15 @@ def _on_frame(frame: VisionResult) -> None:
         _window.append(frame)
 
 
-def _aggregate() -> dict:
-    """Window → Dict. Mittelwerte über Treffer-Frames, sonst found=False."""
+def _aggregate(name: str) -> dict:
+    """Window → Dict. Mittelwerte über Treffer-Frames, sonst found=False.
+
+    `name` wird vom Aufrufer unter _tracking_lock gelesen und hier nur noch
+    durchgereicht — so wird _current_name nicht aus zwei verschiedenen Locks
+    heraus gelesen.
+    """
     with _window_lock:
         snapshot = list(_window)
-        name = _current_name or ""
 
     hits = [f for f in snapshot if f.found]
     if len(hits) < CONFIG.min_hits_in_window:
@@ -183,6 +190,12 @@ def start_tracking(name: str) -> dict:
 
         _current_name = name
         _stop_event = threading.Event()
+        # Hinweis: _get_detector() läuft hier unter _tracking_lock. Im
+        # Normalbetrieb hat prewarm() den Detector beim Server-Start bereits
+        # gebaut, daher ist das billig. Nur falls prewarm fehlschlug, kann die
+        # (langsame) Detector-Init hier kurz auch /track/latest und
+        # /track/stop blockieren. Die Init bewusst NICHT außerhalb des Locks,
+        # sonst könnten zwei parallele start-Aufrufe doppelt initialisieren.
         detector = _get_detector()
         _tracking_thread = threading.Thread(
             target=_run_stream,
@@ -206,7 +219,7 @@ def _run_stream(detector: DetectorProtocol, name: str, stop_event: threading.Eve
     try:
         detector.stream(name, _on_frame, stop_event)
     except Exception as e:
-        print(f"[visual] Stream-Fehler: {e}")
+        log.error("Stream-Fehler: %s", e, exc_info=True)
         with _window_lock:
             _window.clear()
         # Stream-Frames für /stream ebenfalls verwerfen — sonst zeigt der
@@ -218,11 +231,12 @@ def get_latest() -> dict:
     """Aktuelles aggregiertes Window-Ergebnis. status='idle' wenn nichts läuft."""
     with _tracking_lock:
         running = _tracking_thread is not None and _tracking_thread.is_alive()
+        name = _current_name or ""
 
     if not running:
         return {"status": "idle"}
 
-    return {"status": "running", **_aggregate()}
+    return {"status": "running", **_aggregate(name)}
 
 
 def stop_tracking() -> dict:
@@ -241,6 +255,18 @@ def _stop_locked() -> None:
     if _tracking_thread is not None:
         # Timeout aus Config: GStreamer-Pipeline braucht u.U. etwas zum Aufräumen.
         _tracking_thread.join(timeout=CONFIG.stop_timeout_seconds)
+        if _tracking_thread.is_alive():
+            # Thread ist nach dem Timeout NICHT durch. Python kann ihn nicht
+            # hart killen — wir geben die Referenz trotzdem frei, aber der
+            # alte Thread hält evtl. noch Kamera/GStreamer-Pipeline. Ein
+            # unmittelbar folgender start_tracking() kann dann auf eine noch
+            # belegte Kamera laufen (v.a. Hailo auf dem Pi). Sichtbar machen,
+            # statt still zu verschlucken.
+            log.warning(
+                "Detector-Thread nach %.1fs Timeout noch aktiv — Kamera/Pipeline "
+                "evtl. noch belegt. Falls der nächste Start hängt, hier prüfen.",
+                CONFIG.stop_timeout_seconds,
+            )
     _tracking_thread = None
     _stop_event = None
     _current_name = None

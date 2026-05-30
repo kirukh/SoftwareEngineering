@@ -6,8 +6,8 @@ liefert ("Dauerfeuer"). Controller pollt das aktuelle aggregierte Ergebnis.
 Zusätzlich gibt es einen MJPEG-Live-Stream (`GET /stream`) mit eingezeichneten
 Bounding-Boxen, den das Audio-Team in seine Oberfläche einbetten kann.
 
-**Quick Start für Controller-Team:** siehe [`Anleitung.md`](Anleitung.md).
-**Lokal testen (ohne Pi):** siehe [`TESTING.md`](TESTING.md).
+**Quick Start für Controller-Team:** siehe [`instruction.md`](instruction.md).
+**Lokal testen (ohne Pi):** siehe [`testing.md`](testing.md).
 
 ## Architektur
 
@@ -232,7 +232,7 @@ python live_e2e_test.py          # interaktiver Webcam-Test (YOLO), Default cell
 
 Windows (PowerShell): identische Befehle, nur `python` ggf. als `py`.
 Ausführliche Schritt-für-Schritt-Anleitung zum lokalen Testen (inkl.
-`/stream`): siehe [`TESTING.md`](TESTING.md).
+`/stream`): siehe [`testing.md`](testing.md).
 
 ## Architektur-Entscheidung: HTTP-Server (Sprint 2)
 

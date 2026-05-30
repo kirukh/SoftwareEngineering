@@ -6,6 +6,7 @@ gemeinsamen FRAME_BUFFER. Der /stream-Endpoint liest von dort.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -15,6 +16,8 @@ from ultralytics import YOLO
 from config import CONFIG
 from frame_buffer import FRAME_BUFFER
 from visual_interface import FrameCallback, VisionResult
+
+log = logging.getLogger("visual.yolo")
 
 # Hinweis: Der Controller liefert immer bereits korrekte COCO-Labels
 # (Mapping passiert im Audio-Team). Daher kein Aliasing hier nötig.
@@ -96,7 +99,7 @@ def _publish_frame(result) -> None:
             FRAME_BUFFER.set_frame(buf.tobytes())
     except Exception as e:
         # Ein fehlgeschlagener Frame darf das Tracking nicht abbrechen.
-        print(f"[yolo] Frame-Encoding fehlgeschlagen: {e}")
+        log.warning("Frame-Encoding fehlgeschlagen: %s", e)
 
 
 def _best_match(result, names: dict, target: str):

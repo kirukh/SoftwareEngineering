@@ -4,7 +4,7 @@ FastAPI auf 127.0.0.1:7995 (Default). Endpoints:
     POST   /track/start    Body: {"name": "cell phone"}
     GET    /track/latest   aggregiertes Window-Ergebnis
     POST   /track/stop     Tracking beenden
-    GET    /health         Server-Check (inkl. aktiver Detector)
+    GET    /health         Server-Check (inkl. aktiver Detector + ready-Flag)
     GET    /stream         MJPEG-Live-Stream mit eingezeichneten Boxen
 
 Konfiguration: siehe config.py (Defaults < config.yaml < Env-Variablen).
@@ -13,7 +13,18 @@ Aktive Werte anzeigen: `python config.py`.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
+
+# Logging einmalig konfigurieren, BEVOR die Module unten importiert werden,
+# damit ihre Log-Ausgaben (config-Warnungen, Detector-Wahl, prewarm) sichtbar
+# sind. basicConfig ist idempotent — ein evtl. später folgendes uvicorn-Setup
+# überschreibt es nicht.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("visual.server")
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -29,15 +40,16 @@ from frame_buffer import FRAME_BUFFER
 async def lifespan(app: FastAPI):
     # Detector beim Server-Start vorladen, damit /health erst antwortet wenn
     # alles bereit ist und der erste /track/start nicht in einen Timeout läuft.
-    print("[server] Detector wird vorgeladen...")
+    log.info("Detector wird vorgeladen...")
     try:
         visual.prewarm()
-        print(f"[server] Bereit. Aktiver Detector: {visual.active_detector()}")
+        log.info("Bereit. Aktiver Detector: %s", visual.active_detector())
     except Exception as e:
         # Prewarm-Fehler nicht den Server-Start abbrechen lassen — das wäre
-        # schlecht im Rollout. Stattdessen loggen, der erste /track/start
-        # liefert dann den Fehler.
-        print(f"[server] Prewarm fehlgeschlagen: {e}")
+        # schlecht im Rollout. Stattdessen loggen, /health meldet dann
+        # status='degraded' / ready=false, und der erste /track/start liefert
+        # den eigentlichen Fehler.
+        log.error("Prewarm fehlgeschlagen: %s", e, exc_info=True)
     yield
     visual.stop_tracking()
 
@@ -85,8 +97,9 @@ class TrackStopRes(BaseModel):
 
 
 class HealthRes(BaseModel):
-    status: str
-    detector: str  # 'hailo' | 'yolo' | 'none' | ...
+    status: str           # 'ok' wenn ein Detector geladen ist, sonst 'degraded'
+    detector: str         # 'hailo' | 'yolo' | 'none' | ...
+    ready: bool           # True wenn Detection tatsächlich bereit ist
 
 
 # ------------------------------------------------------------------ Endpoints
@@ -111,7 +124,22 @@ def track_stop() -> TrackStopRes:
 
 @app.get("/health", response_model=HealthRes, summary="Server-Health-Check")
 def health() -> HealthRes:
-    return HealthRes(status="ok", detector=visual.active_detector())
+    """Health- und Readiness-Check.
+
+    Wichtig für das Controller-Team: HTTP 200 heißt nur "Server läuft". Ob
+    Detection wirklich bereit ist (prewarm erfolgreich, ein Detector geladen),
+    steht im `ready`-Flag bzw. an `status`:
+      - ready=true,  status="ok"        → losgehen
+      - ready=false, status="degraded"  → Server up, aber kein Detector
+        (z.B. prewarm fehlgeschlagen). Ein /track/start würde 500 liefern.
+    """
+    detector = visual.active_detector()
+    ready = detector not in ("", "none")
+    return HealthRes(
+        status="ok" if ready else "degraded",
+        detector=detector,
+        ready=ready,
+    )
 
 
 # ------------------------------------------------------------------ MJPEG-Stream
@@ -188,5 +216,5 @@ def stream() -> StreamingResponse:
 # ------------------------------------------------------------------ Main
 
 if __name__ == "__main__":
-    print(f"[server] Starte auf {CONFIG.host}:{CONFIG.port}")
+    log.info("Starte auf %s:%s", CONFIG.host, CONFIG.port)
     uvicorn.run("server:app", host=CONFIG.host, port=CONFIG.port, reload=False)

@@ -12,11 +12,14 @@ damit der /stream-Endpoint ein Live-Bild mit Boxen liefern kann.
 """
 from __future__ import annotations
 
+import logging
 import threading
 
 from config import CONFIG
 from frame_buffer import FRAME_BUFFER
 from visual_interface import FrameCallback, VisionResult
+
+log = logging.getLogger("visual.hailo")
 
 # Hailo-Stack ist nur auf dem Pi installiert — Imports dürfen auf dem Laptop fehlschlagen.
 _hailo_available = False
@@ -107,29 +110,29 @@ def _attach_frame_tap(app, stop_event: threading.Event) -> None:
     ein Zusatzfeature, kein Grund das Kern-Tracking zu riskieren.
     """
     if not _frame_libs_available:
-        print("[hailo] numpy/cv2 fehlen — Frame-Tap für /stream deaktiviert.")
+        log.warning("numpy/cv2 fehlen — Frame-Tap für /stream deaktiviert.")
         return
 
     # Kurz warten, bis die Pipeline aufgebaut ist.
     pipeline = getattr(app, "pipeline", None)
     if pipeline is None:
-        print("[hailo] app.pipeline nicht vorhanden — Frame-Tap übersprungen.")
+        log.warning("app.pipeline nicht vorhanden — Frame-Tap übersprungen.")
         return
 
     # TODO(T-20): Element-Name am echten Pi verifizieren.
     overlay = pipeline.get_by_name("hailo_overlay")
     if overlay is None:
-        print("[hailo] Overlay-Element nicht gefunden — /stream bleibt leer. "
-              "Element-Namen am Pi prüfen (siehe TODO im Code).")
+        log.warning("Overlay-Element nicht gefunden — /stream bleibt leer. "
+                    "Element-Namen am Pi prüfen (siehe TODO im Code).")
         return
 
     src_pad = overlay.get_static_pad("src")
     if src_pad is None:
-        print("[hailo] Overlay-src-Pad nicht gefunden — /stream bleibt leer.")
+        log.warning("Overlay-src-Pad nicht gefunden — /stream bleibt leer.")
         return
 
     src_pad.add_probe(Gst.PadProbeType.BUFFER, _frame_probe, None)
-    print("[hailo] Frame-Tap für /stream eingehängt (hinter hailo_overlay).")
+    log.info("Frame-Tap für /stream eingehängt (hinter hailo_overlay).")
 
 
 def _frame_probe(pad, info, user_data):
@@ -171,7 +174,7 @@ def _frame_probe(pad, info, user_data):
             buffer.unmap(map_info)
     except Exception as e:
         # Ein kaputter Frame darf die Pipeline nicht stören.
-        print(f"[hailo] Frame-Probe-Fehler (ignoriert): {e}")
+        log.warning("Frame-Probe-Fehler (ignoriert): %s", e)
 
     return Gst.PadProbeReturn.OK
 
@@ -193,7 +196,7 @@ def _shutdown_pipeline(app) -> None:
         try:
             app.shutdown()
         except Exception as e:
-            print(f"[hailo] app.shutdown() warf Fehler: {e}")
+            log.warning("app.shutdown() warf Fehler: %s", e)
 
     # 2) GStreamer-Pipeline auf NULL setzen
     try:
@@ -201,7 +204,7 @@ def _shutdown_pipeline(app) -> None:
         if pipeline is not None:
             pipeline.set_state(Gst.State.NULL)
     except Exception as e:
-        print(f"[hailo] pipeline.set_state(NULL) warf Fehler: {e}")
+        log.warning("pipeline.set_state(NULL) warf Fehler: %s", e)
 
     # 3) GLib.MainLoop quitten (nötig, sonst hängt der Runner-Thread)
     try:
@@ -209,7 +212,7 @@ def _shutdown_pipeline(app) -> None:
         if loop is not None and hasattr(loop, "quit"):
             loop.quit()
     except Exception as e:
-        print(f"[hailo] loop.quit() warf Fehler: {e}")
+        log.warning("loop.quit() warf Fehler: %s", e)
 
 
 def _make_callback(

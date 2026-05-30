@@ -130,7 +130,7 @@ A few things worth knowing anyway, since it shares the server:
   and works with Hailo as usual.
 
 If the audio team wants to integrate it, point them at `tkinter_stream_example.py`
-and section 10 of `Anleitung.md`.
+and section 10 of `instruction.md`.
 
 ## Heads-up about your old `interface.py` wrapper
 
@@ -167,7 +167,7 @@ Then point your code at `http://127.0.0.1:7995` and try with COCO labels like `"
 
 ## Repo + docs
 
-- `Anleitung.md` — **start here**, step-by-step guide for the controller team
+- `instruction.md` — **start here**, step-by-step guide for the controller team
 - `README.md` — full HTTP-API reference and config
 - `testing.md` — step-by-step local test guide (no Pi needed)
 - `sprints.md` — sprint history with architecture decisions

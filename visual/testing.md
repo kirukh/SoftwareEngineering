@@ -1,11 +1,11 @@
-# TESTING.md — Visual-Modul lokal testen (ohne Pi)
+# testing.md — Visual-Modul lokal testen (ohne Pi)
 
 Diese Anleitung beschreibt, wie ihr das Visual-Modul auf einem normalen
 Rechner (Laptop/Desktop, Windows oder Linux/macOS) testet — also den
 kompletten **YOLO-Pfad**: Server, Tracking, MJPEG-Stream.
 
 Der **Hailo-Pfad** lässt sich nur auf dem Pi testen und ist hier nicht
-abgedeckt (siehe `Anleitung.md`, Abschnitt 10, Task T-20).
+abgedeckt (siehe `testing.md`, Abschnitt 10, Task T-20).
 
 Befehle sind in zwei Varianten angegeben:
 **Linux / macOS** und **Windows (PowerShell)**.
@@ -19,7 +19,7 @@ Befehle sind in zwei Varianten angegeben:
 - Abhängigkeiten installiert:
 
 ```bash
-pip install -r requirements-laptop.txt
+pip install -r requirements.txt
 pip install pillow          # nur für das Tkinter-Stream-Beispiel
 ```
 

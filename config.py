@@ -15,10 +15,13 @@ Aktive Werte ausgeben (zum Debuggen):
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, fields, asdict
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("visual.config")
 
 
 # ------------------------------------------------------------------ Defaults
@@ -124,16 +127,19 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     try:
         import yaml  # type: ignore
     except ImportError:
-        print(f"[config] {path.name} gefunden, aber PyYAML nicht installiert — wird ignoriert.")
+        log.warning("%s gefunden, aber PyYAML nicht installiert — wird ignoriert.", path.name)
         return {}
     try:
         with path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except Exception as e:
-        print(f"[config] {path.name} konnte nicht gelesen werden: {e} — wird ignoriert.")
+        log.warning("%s konnte nicht gelesen werden: %s — wird ignoriert.", path.name, e)
         return {}
     if not isinstance(data, dict):
-        print(f"[config] {path.name}: Top-Level muss ein Mapping sein, ist {type(data).__name__} — ignoriert.")
+        log.warning(
+            "%s: Top-Level muss ein Mapping sein, ist %s — ignoriert.",
+            path.name, type(data).__name__,
+        )
         return {}
     # Optional: unter 'visual:' verschachtelt, falls die Datei später team-übergreifend wird.
     if "visual" in data and isinstance(data["visual"], dict):
@@ -153,14 +159,14 @@ def load_config(yaml_path: Path | None = None) -> VisualConfig:
     yaml_data = _load_yaml(yaml_file)
     for name, value in yaml_data.items():
         if name not in field_types:
-            print(f"[config] Unbekanntes Feld in {yaml_file.name}: {name!r} — ignoriert.")
+            log.warning("Unbekanntes Feld in %s: %r — ignoriert.", yaml_file.name, name)
             continue
         # type-string in echten Typ auflösen ist tricky; nutzen Default-Wert als Hinweis
         default_val = getattr(cfg, name)
         try:
             setattr(cfg, name, _coerce(value, type(default_val)))
         except (ValueError, TypeError) as e:
-            print(f"[config] YAML-Wert für {name}={value!r} ungültig: {e} — Default beibehalten.")
+            log.warning("YAML-Wert für %s=%r ungültig: %s — Default beibehalten.", name, value, e)
 
     # 2) Env-Layer
     for name, env_var in _ENV_MAP.items():
@@ -171,7 +177,7 @@ def load_config(yaml_path: Path | None = None) -> VisualConfig:
         try:
             setattr(cfg, name, _coerce(raw, type(default_val)))
         except (ValueError, TypeError) as e:
-            print(f"[config] Env {env_var}={raw!r} ungültig: {e} — vorigen Wert beibehalten.")
+            log.warning("Env %s=%r ungültig: %s — vorigen Wert beibehalten.", env_var, raw, e)
 
     # detector_mode normalisieren (lower, leerstring statt None)
     cfg.detector_mode = (cfg.detector_mode or "").strip().lower()
@@ -187,6 +193,9 @@ CONFIG: VisualConfig = load_config()
 # ------------------------------------------------------------------ Debug-Helper
 
 def _print_config() -> None:
+    # Bewusst print() statt logging: das ist die CLI-Ausgabe von
+    # `python config.py` und soll immer auf stdout landen, unabhängig vom
+    # Log-Level.
     print("Aktive Visual-Konfiguration:")
     for k, v in asdict(CONFIG).items():
         env = _ENV_MAP.get(k, "—")

@@ -3,7 +3,7 @@
 Diese Anleitung erklärt, wie der Visual-Server auf dem Pi gestartet wird und wie ihr (Controller-Team) ihn aus eurem Code anspricht. Sprint-Ziel: Roboter findet ein vom Audio-Team gemeldetes Objekt und liefert die Koordinaten zurück.
 
 Für die **Bildübertragung** (MJPEG-Stream ans Audio-Team) siehe Abschnitt 10.
-Für das **lokale Testen ohne Pi** siehe die separate [`TESTING.md`](TESTING.md).
+Für das **lokale Testen ohne Pi** siehe die separate [`testing.md`](testing.md).
 
 ## TL;DR für das Controller-Team
 
@@ -33,7 +33,7 @@ Das ist alles. Details unten.
 ```bash
 git clone <unser-repo>
 cd visual/
-pip install -r requirements-laptop.txt
+pip install -r requirements.txt
 ```
 
 Auf dem Pi ist zusätzlich der Hailo-Stack installiert (das macht der Pi-Setup-Script vom Team — fragt Christian, wenn das auf einem frischen Pi gemacht werden muss).
@@ -292,7 +292,7 @@ Windows (PowerShell):
 $env:VISUAL_DETECTOR="yolo"; python server.py
 ```
 
-Dann gegen `http://127.0.0.1:7995` arbeiten. COCO-Label `"person"` ist am zuverlässigsten zum Probieren. **Ausführliche Schritt-für-Schritt-Anleitung inklusive Stream-Test: siehe [`TESTING.md`](TESTING.md).**
+Dann gegen `http://127.0.0.1:7995` arbeiten. COCO-Label `"person"` ist am zuverlässigsten zum Probieren. **Ausführliche Schritt-für-Schritt-Anleitung inklusive Stream-Test: siehe [`testing.md`](testing.md).**
 
 ## 9. Konfiguration für externen Zugriff
 

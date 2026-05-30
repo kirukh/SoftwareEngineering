@@ -75,7 +75,7 @@ die ihr folgt.
 | T-26 | `HailoDetector`: Frame-Abgriff aus der GStreamer-Pipeline (Code) | US-15/17 | 2 | ✅ Code Done — Pi-Verifikation offen |
 | T-27 | Stream-Parameter in `config.py` (`stream_jpeg_quality`, `stream_fps`) | US-14 | 0.5 | ✅ Done |
 | T-28 | `tkinter_stream_example.py` als Vorlage fürs Audio-Team | US-16 | 1 | ✅ Done |
-| T-29 | Doku: `README.md`, `Anleitung.md`, neue `TESTING.md`, `changes.md` | US-16 | 1 | ✅ Done |
+| T-29 | Doku: `README.md`, `instruction.md`, neue `testing.md`, `changes.md` | US-16 | 1 | ✅ Done |
 | T-30 | Hailo-Stream am echten Pi verifizieren | US-17 | 2 | ⏳ Open |
 | T-31 | Integrationstest mit Audio- + Controller-Team (Stream im Audio-GUI) | US-16 | 1.5 | ⏳ Open |
 
@@ -96,7 +96,7 @@ mit Prof. Jehle (siehe offene Punkte).
 - `GET /stream` liefert einen MJPEG-Stream, im Browser einbettbar ✓
 - Stream zeigt bei aktivem Tracking eingezeichnete Boxen (YOLO getestet) ✓
 - Tkinter-Vorlage liegt im Repo und ist dokumentiert ✓
-- Doku aktualisiert (`README`, `Anleitung`, `TESTING`, `changes`) ✓
+- Doku aktualisiert (`README`, `instruction`, `testing`, `changes`) ✓
 - **Offen:** Hailo-Stream am Pi verifiziert (T-30)
 - **Offen:** Integrationstest mit Audio- + Controller-Team bestanden (T-31)
 
@@ -161,7 +161,7 @@ funktionieren.
 | US-09 | Visual-Port liegt in der zugewiesenen Range (7991–8000). | Default-Port = 7995 in allen Files konsistent. | 1 |
 | US-10 | Server läuft auch ohne funktionierendes Hailo-Kit. | Auto-Modus fällt bei Hailo-Fehler auf YOLO zurück, Server startet, `/health` zeigt aktiven Detector. | 2 |
 | US-11 | Hailo-Path auf dem Pi getestet (T-10 aus Sprint 2 nachgezogen). | `live_e2e_test.py` läuft mit Hailo auf dem Pi, Treffer für mind. ein COCO-Label. | 3 |
-| US-12 | Controller-Team kann uns ohne Rückfragen einbinden. | `Anleitung.md` ist vorhanden, deckt Start, API und Polling-Pattern ab. | 1 |
+| US-12 | Controller-Team kann uns ohne Rückfragen einbinden. | `instruction.md` ist vorhanden, deckt Start, API und Polling-Pattern ab. | 1 |
 | US-13 | End-to-End: Audio → Controller → Visual → Controller → Aktion. | Joint-Test-Session: gesprochenes Objekt löst Detection aus, Controller bekommt sinnvolle Koordinaten. | 3 |
 
 **Gesamt: 10 Story Points**
@@ -174,7 +174,7 @@ funktionieren.
 | T-15 | Auto-Fallback in `_get_detector()` härten | US-10 | 1 | ✅ Done |
 | T-16 | `/health` um `detector`-Feld erweitern, `VisualClient.health_info()` | US-10 | 0.5 | ✅ Done |
 | T-17 | Hailo-Detector: robustes `_shutdown_pipeline()` mit Fallback-Pfaden | US-11 | 1 | ✅ Done |
-| T-18 | `Anleitung.md` für Controller-Team schreiben | US-12 | 1 | ✅ Done |
+| T-18 | `instruciton.md` für Controller-Team schreiben | US-12 | 1 | ✅ Done |
 | T-19 | `VISUAL_HOST` konfigurierbar (Default 127.0.0.1) | US-13 | 0.5 | ✅ Done |
 | T-22 | Zentrale `config.py` (VisualConfig + Env-Override) | US-09/10 | 1 | ✅ Done |
 | T-20 | Pi-Live-Session: Hailo-Stream zum Laufen bringen | US-11 | 3 | ⏳ Open |
@@ -196,7 +196,7 @@ funktionieren.
 
 - Tests grün auf dem Laptop (Fake + Server + Live-E2E mit YOLO) ✓
 - Server startet auf dem Pi (Hailo *oder* YOLO-Fallback)
-- Controller-Team hat `Anleitung.md` gelesen, kann ohne Rückfragen integrieren
+- Controller-Team hat `instruction.md` gelesen, kann ohne Rückfragen integrieren
 - Joint-End-to-End-Test bestanden: gesprochener Befehl löst Detection aus,
   Koordinaten kommen sinnvoll beim Controller an
 - `/health` zeigt den tatsächlichen aktiven Detector, nicht den gewünschten

@@ -51,17 +51,40 @@ class VisualClient:
         return r.json()
 
     def health(self) -> bool:
-        """True wenn der Server antwortet — fürs Hochfahren / Reconnect-Logik."""
+        """True wenn der Server antwortet — fürs Hochfahren / Reconnect-Logik.
+
+        ACHTUNG: prüft nur, ob der HTTP-Server erreichbar ist, NICHT ob ein
+        Detector geladen ist. Für "Detection wirklich bereit?" → ready().
+        """
         try:
             return self._client.get("/health").status_code == 200
         except httpx.HTTPError:
             return False
 
+    def ready(self) -> bool:
+        """True wenn der Server läuft UND ein Detector geladen ist.
+
+        Das ist der Check, den ihr beim Hochfahren wollt: health() ist True,
+        sobald der Server antwortet — auch wenn der prewarm fehlgeschlagen ist
+        und ein /track/start sofort einen 500er liefern würde. ready() schließt
+        das aus.
+
+        Rückwärtskompatibel: wertet das neue 'ready'-Feld aus, fällt sonst auf
+        das 'detector'-Feld zurück (für ältere Server ohne 'ready').
+        """
+        info = self.health_info()
+        if not info:
+            return False
+        if "ready" in info:
+            return bool(info["ready"])
+        return info.get("detector") not in (None, "", "none")
+
     def health_info(self) -> dict | None:
         """Detaillierter Health-Check inkl. aktivem Detector.
 
-        Gibt z.B. {"status": "ok", "detector": "yolo"} zurück, oder None bei Fehler.
-        Praktisch zum Debuggen ('läuft auf dem Pi tatsächlich Hailo?').
+        Gibt z.B. {"status": "ok", "detector": "yolo", "ready": true} zurück,
+        oder None bei Fehler. Praktisch zum Debuggen ('läuft auf dem Pi
+        tatsächlich Hailo?').
         """
         try:
             r = self._client.get("/health")
