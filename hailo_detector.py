@@ -1,19 +1,22 @@
 """HailoDetector — DetectorProtocol-Implementierung für Pi 5 + Hailo-8.
 
-Zusätzlich zum VisionResult pro Frame versucht der Detector, den jeweils
-letzten ANNOTIERTEN Frame in den gemeinsamen FRAME_BUFFER zu schreiben,
-damit der /stream-Endpoint ein Live-Bild mit Boxen liefern kann.
+Nutzt die hailo-apps-API (GStreamerDetectionApp). Pro Frame:
+  1. VisionResult fürs Tracking-Window (on_frame)
+  2. annotierter Frame in den FRAME_BUFFER für /stream
 
-  ⚠️  ACHTUNG — UNGETESTET AM ECHTEN PI (Sprint-Task T-20 noch offen).
-      Der Frame-Abgriff aus der GStreamer-Pipeline unten ist ein fundierter
-      Entwurf, KEIN verifiziertes Feature. Die mit  # TODO(T-20)  markierten
-      Stellen müssen am Gerät geprüft werden. Solange das nicht passiert
-      ist: für die Demo den YOLO-Fallback nutzen, der läuft sicher.
+Der Frame wird über die hailo-apps-Helper aus dem GStreamer-Buffer gezogen
+(get_caps_from_pad + get_numpy_from_buffer) statt über eine zweite Kamera.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
+import signal
+import sys
 import threading
+import time
+
+import cv2
 
 from config import CONFIG
 from frame_buffer import FRAME_BUFFER
@@ -21,37 +24,62 @@ from visual_interface import FrameCallback, VisionResult
 
 log = logging.getLogger("visual.hailo")
 
-# Hailo-Stack ist nur auf dem Pi installiert — Imports dürfen auf dem Laptop fehlschlagen.
+# Modul-Layout unterscheidet sich je nach installiertem Paket — beide probieren:
+#   hailo-apps:           hailo_apps.python.*
+#   hailo-rpi5-examples:  hailo_apps.hailo_app_python.*
 _hailo_available = False
+_import_error: Exception | None = None
+_active_layout = ""
+
+_CANDIDATE_LAYOUTS = [
+    (
+        "hailo_apps.python.pipeline_apps.detection.detection_pipeline",
+        "hailo_apps.python.core.gstreamer.gstreamer_app",
+        "hailo_apps.python.core.common.buffer_utils",
+    ),
+    (
+        "hailo_apps.hailo_app_python.apps.detection.detection_pipeline",
+        "hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app",
+        "hailo_apps.hailo_app_python.core.common.buffer_utils",
+    ),
+]
+
 try:
+    import importlib
+
     import gi
     gi.require_version("Gst", "1.0")
-    from gi.repository import Gst
+    from gi.repository import GLib, Gst
     import hailo
-    from hailo_apps.hailo_app_python.apps.detection_simple.detection_pipeline_simple import (
-        GStreamerDetectionApp,
-    )
-    from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
-    _hailo_available = True
-except ImportError:
-    pass
 
-# numpy für die Frame-Konvertierung. Auf dem Pi via Hailo-Stack vorhanden,
-# auf dem Laptop via ultralytics/opencv. Import defensiv halten.
-try:
-    import numpy as np
-    import cv2
-    _frame_libs_available = True
-except ImportError:
-    _frame_libs_available = False
+    for _det_mod, _gst_mod, _buf_mod in _CANDIDATE_LAYOUTS:
+        try:
+            GStreamerDetectionApp = importlib.import_module(_det_mod).GStreamerDetectionApp
+            app_callback_class = importlib.import_module(_gst_mod).app_callback_class
+            _buf = importlib.import_module(_buf_mod)
+            get_caps_from_pad = _buf.get_caps_from_pad
+            get_numpy_from_buffer = _buf.get_numpy_from_buffer
+            _hailo_available = True
+            _active_layout = _det_mod
+            break
+        except Exception as e:
+            _import_error = e
+except (ImportError, ValueError) as e:
+    _import_error = e
 
-# Hinweis: Der Controller liefert immer bereits korrekte COCO-Labels
-# (Mapping passiert im Audio-Team). Daher kein Aliasing hier nötig.
+if _hailo_available:
+    log.info("Hailo-API geladen (Layout: %s)", _active_layout)
+else:
+    log.warning("Hailo/GStreamer nicht verfügbar (Fallback auf YOLO): %s", _import_error)
 
 
 class HailoDetector:
+    def __init__(self) -> None:
+        if not _hailo_available:
+            raise RuntimeError("Hailo-Bibliotheken fehlen. Läuft nur auf dem Pi.")
+        self._app = None
+
     def prewarm(self) -> None:
-        """Hailo lädt erst beim Pipeline-Start — nichts vorzuladen."""
         pass
 
     def stream(
@@ -60,200 +88,208 @@ class HailoDetector:
         on_frame: FrameCallback,
         stop_event: threading.Event,
     ) -> None:
-        if not _hailo_available:
-            raise RuntimeError("Hailo-Bibliotheken nicht verfügbar. Auf dem Pi ausführen.")
-
         target = object_name.strip().lower()
 
-        class _UserData(app_callback_class):
-            pass
+        user_data = app_callback_class()
+        user_data.use_frame = True  # ohne use_frame liefert die Pipeline kein CPU-Bild
+        callback = _make_callback(target, object_name, on_frame)
 
-        app = GStreamerDetectionApp(
-            _make_callback(target, object_name, on_frame, stop_event),
-            _UserData(),
-        )
+        # GStreamerDetectionApp.__init__ registriert einen SIGINT-Handler via
+        # signal.signal() — das geht nur im Main-Thread, wir laufen aber im
+        # Worker-Thread. _allow_signal_in_thread() neutralisiert das hier.
+        # Eingabequelle/HEF kommen über die Kommandozeile (argparse).
+        argv_backup = sys.argv[:]
+        try:
+            with _allow_signal_in_thread():
+                sys.argv = _build_argv()
+                app = GStreamerDetectionApp(callback, user_data)
+        finally:
+            sys.argv = argv_backup
 
-        # GStreamer-Mainloop blockiert — in eigenen Thread auslagern,
-        # damit wir hier auf stop_event reagieren können.
-        runner = threading.Thread(target=app.run, daemon=True)
-        runner.start()
+        self._app = app
+        _make_queues_leaky(app)  # verhindert das Volllaufen der Queues über die Laufzeit
+        GLib.timeout_add(200, _make_stop_poller(app, stop_event))
 
-        # Frame-Abgriff für /stream einhängen, sobald die Pipeline steht.
-        # Bewusst NACH app.run()-Start, weil app.pipeline erst dann existiert.
-        _attach_frame_tap(app, stop_event)
-
-        stop_event.wait()
-
-        # Pipeline-Shutdown — mehrere Pfade versuchen, je nach Hailo-Version.
-        _shutdown_pipeline(app)
-
-        # Auf das saubere Ende warten, damit die Kamera/Pipeline frei wird.
-        runner.join(timeout=3.0)
-
-        # Puffer leeren, damit der Stream kein eingefrorenes Bild zeigt.
-        FRAME_BUFFER.clear()
+        log.info("Hailo-Pipeline startet. Target='%s', input='%s'", target, CONFIG.hailo_input)
+        try:
+            app.run()  # blockiert bis loop.quit() (durch den Stop-Poller)
+        finally:
+            _shutdown(app)
+            FRAME_BUFFER.clear()
+            log.info("Hailo-Pipeline beendet.")
 
 
-def _attach_frame_tap(app, stop_event: threading.Event) -> None:
-    """Hängt eine Pad-Probe hinter dem Overlay-Element ein, um den
-    annotierten Frame (mit eingezeichneten Boxen) abzugreifen.
+@contextlib.contextmanager
+def _allow_signal_in_thread():
+    """signal.signal() im Worker-Thread tolerieren (ValueError schlucken)."""
+    orig = signal.signal
 
-    ⚠️  TODO(T-20): Dieser ganze Block ist ungetestet. Beim Pi-Live-Test
-    zu verifizieren:
-      - Heißt das Overlay-Element wirklich 'hailo_overlay'?  Pipeline mit
-        `GST_DEBUG_DUMP_DOT_DIR` dumpen und die Element-Namen prüfen.
-      - Liefert der Buffer RGB oder NV12/YUV?  Davon hängt die
-        cv2-Konvertierung unten ab.
-      - Caps (Breite/Höhe) sauslesen statt zu raten.
-    Wenn der Tap nicht klappt, läuft das TRACKING trotzdem weiter —
-    nur der /stream bleibt dann leer. Das ist Absicht: der Stream ist
-    ein Zusatzfeature, kein Grund das Kern-Tracking zu riskieren.
-    """
-    if not _frame_libs_available:
-        log.warning("numpy/cv2 fehlen — Frame-Tap für /stream deaktiviert.")
-        return
+    def _safe(signalnum, handler):
+        try:
+            return orig(signalnum, handler)
+        except ValueError:
+            return None
 
-    # Kurz warten, bis die Pipeline aufgebaut ist.
+    signal.signal = _safe
+    try:
+        yield
+    finally:
+        signal.signal = orig
+
+
+def _build_argv() -> list[str]:
+    # --use-frame ist nötig, damit das CPU-Bild bis zum Callback durchgereicht
+    # wird (sonst bleibt /stream leer). Flag-Namen ggf. mit `hailo-detect --help`
+    # gegenprüfen.
+    argv = ["detection.py", "--input", CONFIG.hailo_input, "--use-frame"]
+    if CONFIG.hailo_hef_path:
+        argv += ["--hef-path", CONFIG.hailo_hef_path]
+    return argv
+
+
+def _make_queues_leaky(app) -> None:
+    """Alle queue-Elemente auf leaky=downstream stellen: bei voller Queue den
+    ältesten Frame verwerfen statt zu puffern. Hält die Latenz über die
+    Laufzeit konstant (Aktualität vor Vollständigkeit)."""
     pipeline = getattr(app, "pipeline", None)
     if pipeline is None:
-        log.warning("app.pipeline nicht vorhanden — Frame-Tap übersprungen.")
         return
-
-    # TODO(T-20): Element-Name am echten Pi verifizieren.
-    overlay = pipeline.get_by_name("hailo_overlay")
-    if overlay is None:
-        log.warning("Overlay-Element nicht gefunden — /stream bleibt leer. "
-                    "Element-Namen am Pi prüfen (siehe TODO im Code).")
-        return
-
-    src_pad = overlay.get_static_pad("src")
-    if src_pad is None:
-        log.warning("Overlay-src-Pad nicht gefunden — /stream bleibt leer.")
-        return
-
-    src_pad.add_probe(Gst.PadProbeType.BUFFER, _frame_probe, None)
-    log.info("Frame-Tap für /stream eingehängt (hinter hailo_overlay).")
-
-
-def _frame_probe(pad, info, user_data):
-    """Pad-Probe: zieht den annotierten Videoframe aus dem GStreamer-Buffer.
-
-    ⚠️  TODO(T-20): Konvertierung ungetestet — Format am Pi prüfen.
-    """
     try:
-        buffer = info.get_buffer()
-        if buffer is None:
-            return Gst.PadProbeReturn.OK
-
-        caps = pad.get_current_caps()
-        if caps is None:
-            return Gst.PadProbeReturn.OK
-
-        structure = caps.get_structure(0)
-        ok_w, width = structure.get_int("width")
-        ok_h, height = structure.get_int("height")
-        if not (ok_w and ok_h):
-            return Gst.PadProbeReturn.OK
-
-        success, map_info = buffer.map(Gst.MapFlags.READ)
-        if not success:
-            return Gst.PadProbeReturn.OK
-        try:
-            # TODO(T-20): Annahme RGB (3 Kanäle). Falls die Pipeline
-            # NV12/YUV liefert, hier cv2.cvtColor mit passendem Code
-            # einsetzen. Format aus structure.get_string("format") lesen.
-            frame = np.frombuffer(map_info.data, dtype=np.uint8)
-            frame = frame.reshape((height, width, 3))
-            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            ok, jpeg = cv2.imencode(
-                ".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG.stream_jpeg_quality]
-            )
-            if ok:
-                FRAME_BUFFER.set_frame(jpeg.tobytes())
-        finally:
-            buffer.unmap(map_info)
+        it = pipeline.iterate_recurse()
+        count = 0
+        while True:
+            res, elem = it.next()
+            if res != Gst.IteratorResult.OK:
+                break
+            factory = elem.get_factory()
+            if factory and factory.get_name() == "queue":
+                try:
+                    elem.set_property("leaky", 2)
+                    elem.set_property("max-size-buffers", 5)
+                    elem.set_property("max-size-time", 0)
+                    elem.set_property("max-size-bytes", 0)
+                    count += 1
+                except Exception as e:
+                    log.debug("queue-Property setzen warf: %s", e)
+        log.info("%d queue-Elemente auf leaky=downstream gesetzt.", count)
     except Exception as e:
-        # Ein kaputter Frame darf die Pipeline nicht stören.
-        log.warning("Frame-Probe-Fehler (ignoriert): %s", e)
-
-    return Gst.PadProbeReturn.OK
+        log.warning("Konnte Queues nicht auf leaky setzen: %s", e)
 
 
-def _shutdown_pipeline(app) -> None:
-    """Pipeline runterfahren — robust gegen API-Unterschiede zwischen Hailo-Versionen.
+def _make_stop_poller(app, stop_event: threading.Event):
+    def _poll() -> bool:
+        if not stop_event.is_set():
+            return True
+        _shutdown(app)
+        return False
+    return _poll
 
-    Wir kennen die exakte API nicht (Pi-Live-Test steht noch aus), daher
-    werden ALLE bekannten Pfade durchlaufen, nicht nur der erste der greift.
-    Das ist redundant, aber ein doppeltes set_state(NULL) ist gefahrlos —
-    ein hängender GLib.MainLoop nicht.
 
-      1) app.shutdown()                          — Hailo-eigene Methode
-      2) app.pipeline.set_state(Gst.State.NULL)  — Standard-GStreamer
-      3) app.loop.quit()                         — GLib-MainLoop killen
-    """
-    # 1) Hailo-eigene Methode
+def _shutdown(app) -> None:
+    """Genau einmal über die framework-eigene shutdown()-Methode runterfahren.
+    Ein zusätzliches manuelles set_state(NULL)/loop.quit() würde doppelt
+    teardownen und kann segfaulten."""
+    if getattr(app, "_visual_shutdown_done", False):
+        return
+    app._visual_shutdown_done = True
+
     if hasattr(app, "shutdown"):
-        try:
-            app.shutdown()
-        except Exception as e:
-            log.warning("app.shutdown() warf Fehler: %s", e)
-
-    # 2) GStreamer-Pipeline auf NULL setzen
+        for args in ((), (None, None)):
+            try:
+                app.shutdown(*args)
+                return
+            except TypeError:
+                continue
+            except Exception as e:
+                log.debug("app.shutdown%s warf: %s", args, e)
+                return
     try:
         pipeline = getattr(app, "pipeline", None)
         if pipeline is not None:
             pipeline.set_state(Gst.State.NULL)
-    except Exception as e:
-        log.warning("pipeline.set_state(NULL) warf Fehler: %s", e)
-
-    # 3) GLib.MainLoop quitten (nötig, sonst hängt der Runner-Thread)
-    try:
         loop = getattr(app, "loop", None)
         if loop is not None and hasattr(loop, "quit"):
             loop.quit()
     except Exception as e:
-        log.warning("loop.quit() warf Fehler: %s", e)
+        log.debug("Fallback-Shutdown warf: %s", e)
 
 
-def _make_callback(
-    target: str,
-    original_name: str,
-    on_frame: FrameCallback,
-    stop_event: threading.Event,
-):
-    """Wird pro Frame aus der GStreamer-Pipeline aufgerufen."""
-    def _callback(pad, info, user_data):
-        if stop_event.is_set():
-            return Gst.PadProbeReturn.OK
+def _make_callback(target: str, original_name: str, on_frame: FrameCallback):
+    """hailo-apps ruft den Callback über das identity_callback-Element per
+    handoff-Signal auf: Signatur (element, buffer, user_data), buffer ist
+    direkt der Gst.Buffer."""
 
-        buffer = info.get_buffer()
+    diag = {"caps_logged": False, "pub_logged": False, "caps_warned": False}
+    stream_interval = 1.0 / max(1, CONFIG.stream_fps)
+    last_stream = {"ts": 0.0}
+
+    def _callback(element, buffer, user_data):
         if buffer is None:
-            return Gst.PadProbeReturn.OK
+            return
 
-        roi = hailo.get_roi_from_buffer(buffer)
-        best_conf, best_x, best_y, best_w, best_h = 0.0, 0.0, 0.0, 0.0, 0.0
+        try:
+            roi = hailo.get_roi_from_buffer(buffer)
+            best = None  # (conf, x_center, y_center, w, h), normiert 0..1
+            for det in roi.get_objects_typed(hailo.HAILO_DETECTION):
+                if (det.get_label() or "").strip().lower() != target:
+                    continue
+                conf = float(det.get_confidence())
+                if conf < CONFIG.confidence_min:
+                    continue
+                if best is None or conf > best[0]:
+                    bbox = det.get_bbox()
+                    w, h = bbox.width(), bbox.height()
+                    best = (conf, bbox.xmin() + w / 2.0, bbox.ymin() + h / 2.0, w, h)
 
-        for det in roi.get_objects_typed(hailo.HAILO_DETECTION):
-            label = (det.get_label() or "").strip().lower()
-            if label != target:
-                continue
-            conf = float(det.get_confidence())
-            if conf >= CONFIG.confidence_min and conf > best_conf:
-                bbox = det.get_bbox()
-                best_conf = conf
-                best_x, best_y = bbox.x_center(), bbox.y_center()
-                best_w, best_h = bbox.width(), bbox.height()
+            if best is not None:
+                conf, x_c, y_c, w, h = best
+                on_frame(VisionResult(
+                    original_name, True,
+                    round(conf, 4), round(x_c, 4), round(y_c, 4), round(w, 4), round(h, 4),
+                ))
+            else:
+                on_frame(VisionResult(original_name, False, 0.0))
+        except Exception as e:
+            best = None
+            log.warning("Detektion fehlgeschlagen (ignoriert): %s", e)
 
-        if best_conf > 0:
-            on_frame(VisionResult(
-                original_name, True,
-                round(best_conf, 4),
-                round(best_x, 4), round(best_y, 4),
-                round(best_w, 4), round(best_h, 4),
-            ))
-        else:
-            on_frame(VisionResult(original_name, False, 0.0))
+        # Teures Frame-Abgreifen auf stream_fps drosseln (Detektion oben läuft
+        # bei jedem Frame). Verhindert Pipeline-Rückstau.
+        if getattr(user_data, "use_frame", False) and (
+            time.monotonic() - last_stream["ts"] >= stream_interval
+        ):
+            last_stream["ts"] = time.monotonic()
+            try:
+                pad = element.get_static_pad("sink") or element.get_static_pad("src")
+                fmt, width, height = get_caps_from_pad(pad)
 
-        return Gst.PadProbeReturn.OK
+                if not diag["caps_logged"]:
+                    log.info("Stream-Caps: format=%r %sx%s", fmt, width, height)
+                    diag["caps_logged"] = True
+
+                if fmt is not None and width and height:
+                    frame = cv2.cvtColor(
+                        get_numpy_from_buffer(buffer, fmt, width, height), cv2.COLOR_RGB2BGR
+                    )
+                    if best is not None:
+                        conf, x_c, y_c, w, h = best
+                        x1, y1 = int((x_c - w / 2) * width), int((y_c - h / 2) * height)
+                        x2, y2 = int((x_c + w / 2) * width), int((y_c + h / 2) * height)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(frame, f"{original_name} {conf:.2f}", (x1, max(0, y1 - 10)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    FRAME_BUFFER.set_frame(frame)
+                    if not diag["pub_logged"]:
+                        log.info("Erster Stream-Frame veröffentlicht (%dx%d).", width, height)
+                        diag["pub_logged"] = True
+                elif not diag["caps_warned"]:
+                    log.warning("Keine Video-Caps am identity-Pad (format=%r) — /stream bleibt leer.", fmt)
+                    diag["caps_warned"] = True
+            except Exception as e:
+                if not diag["caps_warned"]:
+                    log.warning("Frame-Abgriff fehlgeschlagen (einmalig geloggt): %s", e)
+                    diag["caps_warned"] = True
+
+        return  # handoff-Rückgabewert wird ignoriert
 
     return _callback

@@ -1,8 +1,7 @@
 """YoloDetector — DetectorProtocol-Implementierung mit YOLOv8 + Webcam.
 
-Zusätzlich zum VisionResult pro Frame schreibt der Detector den jeweils
-letzten ANNOTIERTEN Frame (Boxen eingezeichnet, JPEG-kodiert) in den
-gemeinsamen FRAME_BUFFER. Der /stream-Endpoint liest von dort.
+Fallback bzw. lokales Testen ohne Pi. Pro Frame: VisionResult fürs Tracking
+und der annotierte Frame (rohes BGR-Array) in den FRAME_BUFFER für /stream.
 """
 from __future__ import annotations
 
@@ -19,9 +18,6 @@ from visual_interface import FrameCallback, VisionResult
 
 log = logging.getLogger("visual.yolo")
 
-# Hinweis: Der Controller liefert immer bereits korrekte COCO-Labels
-# (Mapping passiert im Audio-Team). Daher kein Aliasing hier nötig.
-
 
 class YoloDetector:
     def __init__(self) -> None:
@@ -33,7 +29,6 @@ class YoloDetector:
         return self._model
 
     def prewarm(self) -> None:
-        """Modell vorladen — vom Server beim Start aufgerufen."""
         self._model_lazy()
 
     def stream(
@@ -48,58 +43,42 @@ class YoloDetector:
 
         cap = cv2.VideoCapture(CONFIG.camera_index)
         if not cap.isOpened():
-            raise RuntimeError(f"Kamera {CONFIG.camera_index} konnte nicht geöffnet werden.")
+            raise RuntimeError(f"Kamera (Index {CONFIG.camera_index}) konnte nicht geöffnet werden.")
 
+        log.info("YOLO-Webcam-Stream gestartet. Target='%s'", target)
         try:
             while not stop_event.is_set():
-                ok, frame = cap.read()
-                if not ok:
-                    time.sleep(0.02)
+                ret, frame = cap.read()
+                if not ret:
+                    log.warning("Kein Frame von der Webcam.")
+                    time.sleep(0.01)
                     continue
 
-                results = model.predict(
-                    frame, conf=CONFIG.confidence_min, verbose=False, imgsz=640
-                )
+                results = model.predict(frame, verbose=False)
+                if not results:
+                    continue
                 result = results[0]
+
                 match = _best_match(result, names, target)
-
-                if match is None:
-                    on_frame(VisionResult(object_name, False, 0.0))
-                else:
+                if match is not None:
                     conf, x, y, w, h = match
-                    on_frame(VisionResult(
-                        object_name, True,
-                        round(conf, 4),
-                        round(x, 4), round(y, 4),
-                        round(w, 4), round(h, 4),
-                    ))
+                    on_frame(VisionResult(object_name, True, conf, x, y, w, h))
+                else:
+                    on_frame(VisionResult(object_name, False, 0.0))
 
-                # --- Annotierten Frame für den /stream-Endpoint ablegen ---
-                # result.plot() rendert ALLE erkannten Objekte mit Box,
-                # Label und Confidence in ein BGR-Array. Das zeigt auch
-                # andere COCO-Objekte, nicht nur das gesuchte — fürs
-                # Debuggen/Demo gewollt. Wenn nur das Zielobjekt gezeigt
-                # werden soll, müsste man hier manuell filtern und zeichnen.
                 _publish_frame(result)
         finally:
             cap.release()
-            # Beim Stop den Puffer leeren, damit der Stream nicht ein
-            # eingefrorenes altes Bild weiterzeigt.
             FRAME_BUFFER.clear()
 
 
 def _publish_frame(result) -> None:
-    """Annotierten Frame zu JPEG kodieren und in den FRAME_BUFFER legen."""
     try:
-        annotated = result.plot()  # BGR-ndarray mit Boxen/Labels/Confidence
-        ok, buf = cv2.imencode(
-            ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG.stream_jpeg_quality]
-        )
-        if ok:
-            FRAME_BUFFER.set_frame(buf.tobytes())
+        annotated = result.plot()  # BGR mit Boxen/Labels/Confidence
+        if annotated is not None:
+            FRAME_BUFFER.set_frame(annotated.copy())
     except Exception as e:
-        # Ein fehlgeschlagener Frame darf das Tracking nicht abbrechen.
-        log.warning("Frame-Encoding fehlgeschlagen: %s", e)
+        log.warning("Frame-Übergabe an den Puffer fehlgeschlagen: %s", e)
 
 
 def _best_match(result, names: dict, target: str):
@@ -107,16 +86,12 @@ def _best_match(result, names: dict, target: str):
     if result.boxes is None or len(result.boxes) == 0:
         return None
 
-    img_h, img_w = result.orig_shape
     best = None
-
     for box in result.boxes:
-        label = names.get(int(box.cls[0]), "").lower()
-        if label != target:
+        if names.get(int(box.cls[0]), "").lower() != target:
             continue
         conf = float(box.conf[0])
         if best is None or conf > best[0]:
-            x_px, y_px, w_px, h_px = box.xywh[0].tolist()
-            best = (conf, x_px / img_w, y_px / img_h, w_px / img_w, h_px / img_h)
-
+            x_c, y_c, w, h = box.xywhn[0].tolist()  # bereits normiert 0..1
+            best = (round(conf, 4), round(x_c, 4), round(y_c, 4), round(w, 4), round(h, 4))
     return best

@@ -1,97 +1,79 @@
-"""
-config.py — Zentrale Konfiguration für das Visual-Modul.
+"""Zentrale Konfiguration des Visual-Moduls.
 
 Auflösungsreihenfolge (späteres überschreibt früheres):
-    1) Defaults aus dem Code (sicher, immer da)
-    2) config.yaml im Repo-Root, falls vorhanden und PyYAML installiert
+    1) Defaults im Code
+    2) config.yaml im Repo-Root (optional, benötigt PyYAML)
     3) Umgebungsvariablen (VISUAL_*, VISION_*)
 
-Aufruf:
-    from config import CONFIG
-    print(CONFIG.port, CONFIG.detector_mode)
-
-Aktive Werte ausgeben (zum Debuggen):
-    python config.py
+Aktive Werte anzeigen: ``python config.py``
 """
 from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, fields, asdict
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("visual.config")
 
 
-# ------------------------------------------------------------------ Defaults
-
 @dataclass
 class VisualConfig:
-    """Alle Tuning-Parameter des Visual-Moduls an einer Stelle.
+    # Server
+    host: str = "0.0.0.0"        # 0.0.0.0 = von anderen Geräten erreichbar
+    port: int = 7995             # Visual-Range 7991–8000
 
-    Range-Hinweis: Port-Range Visual ist 7991–8000 (Festlegung Prof. Jehle).
-    """
+    # Detector-Wahl: "" (auto: Hailo, sonst YOLO), "hailo", "yolo"
+    detector_mode: str = ""
 
-    # --- Server ---
-    host: str = "127.0.0.1"      # 0.0.0.0 für Netzwerk-Zugriff
-    port: int = 7995             # in Range 7991–8000
+    # Detection
+    confidence_min: float = 0.5
+    window_size: int = 8
+    min_hits_in_window: int = 5
 
-    # --- Detector-Wahl ---
-    detector_mode: str = ""      # "" (auto), "hailo", "yolo"
-
-    # --- Detection-Parameter ---
-    confidence_min: float = 0.5  # pro Frame
-    window_size: int = 8         # Sliding-Window-Größe in Frames
-    min_hits_in_window: int = 5  # Mindesttreffer für found=True
-
-    # --- YOLO-spezifisch ---
-    camera_index: int = 0        # Webcam-Index
+    # YOLO (lokales Testen ohne Pi)
+    camera_index: int = 0
     model_path: str = "yolov8n.pt"
 
-    # --- Timing ---
-    stop_timeout_seconds: float = 5.0  # Wait beim Tracking-Stop
+    # Hailo (Pi 5 + Hailo-8)
+    hailo_input: str = "rpi"     # "rpi" (CSI), "usb" oder /dev/videoX
+    hailo_hef_path: str = ""     # leer = Default-HEF der Pipeline
 
-    # --- MJPEG-Stream (/stream-Endpoint) ---
-    stream_jpeg_quality: int = 80  # JPEG-Qualität 1–100 (höher = größer)
-    stream_fps: int = 15           # max. Frames/s, die /stream ausliefert
+    # Timing
+    stop_timeout_seconds: float = 5.0
+    stale_after_seconds: float = 1.5   # ohne neuen Frame gilt das Window als veraltet
+
+    # MJPEG-Stream
+    stream_jpeg_quality: int = 80
+    stream_fps: int = 15
+    stream_max_width: int = 640        # 0 = nicht verkleinern
 
     def validate(self) -> None:
-        """Plausibilitäts-Checks. Wirft ValueError bei Quatsch."""
         if not (7991 <= self.port <= 8000):
-            raise ValueError(
-                f"port={self.port} außerhalb der Visual-Range 7991–8000. "
-                f"Wenn das Absicht ist, passe die Range im config.py an."
-            )
+            raise ValueError(f"port={self.port} außerhalb der Range 7991–8000")
         if self.detector_mode not in ("", "hailo", "yolo"):
-            raise ValueError(
-                f"detector_mode={self.detector_mode!r} ungültig. "
-                f"Erlaubt: '' (auto), 'hailo', 'yolo'."
-            )
+            raise ValueError(f"detector_mode={self.detector_mode!r} ungültig")
         if not (0.0 <= self.confidence_min <= 1.0):
             raise ValueError(f"confidence_min={self.confidence_min} muss in [0.0, 1.0] liegen")
         if self.window_size < 1:
             raise ValueError(f"window_size={self.window_size} muss >= 1 sein")
         if not (1 <= self.min_hits_in_window <= self.window_size):
-            raise ValueError(
-                f"min_hits_in_window={self.min_hits_in_window} muss in "
-                f"[1, window_size={self.window_size}] liegen"
-            )
+            raise ValueError(f"min_hits_in_window={self.min_hits_in_window} muss in [1, window_size] liegen")
         if self.camera_index < 0:
             raise ValueError(f"camera_index={self.camera_index} muss >= 0 sein")
         if self.stop_timeout_seconds <= 0:
             raise ValueError(f"stop_timeout_seconds={self.stop_timeout_seconds} muss > 0 sein")
+        if self.stale_after_seconds <= 0:
+            raise ValueError(f"stale_after_seconds={self.stale_after_seconds} muss > 0 sein")
         if not (1 <= self.stream_jpeg_quality <= 100):
-            raise ValueError(
-                f"stream_jpeg_quality={self.stream_jpeg_quality} muss in [1, 100] liegen"
-            )
+            raise ValueError(f"stream_jpeg_quality={self.stream_jpeg_quality} muss in [1, 100] liegen")
         if self.stream_fps < 1:
             raise ValueError(f"stream_fps={self.stream_fps} muss >= 1 sein")
+        if self.stream_max_width < 0:
+            raise ValueError(f"stream_max_width={self.stream_max_width} muss >= 0 sein")
 
 
-# ------------------------------------------------------------------ Quellen-Mapping
-
-# Feldname → Env-Variable (Backwards-Kompatibilität mit bestehenden Env-Vars).
 _ENV_MAP: dict[str, str] = {
     "host": "VISUAL_HOST",
     "port": "VISUAL_PORT",
@@ -101,14 +83,17 @@ _ENV_MAP: dict[str, str] = {
     "min_hits_in_window": "VISION_MIN_HITS_IN_WINDOW",
     "camera_index": "VISION_CAMERA_INDEX",
     "model_path": "VISION_MODEL_PATH",
+    "hailo_input": "VISION_HAILO_INPUT",
+    "hailo_hef_path": "VISION_HAILO_HEF_PATH",
     "stop_timeout_seconds": "VISION_STOP_TIMEOUT_SECONDS",
+    "stale_after_seconds": "VISION_STALE_AFTER_SECONDS",
     "stream_jpeg_quality": "VISION_STREAM_JPEG_QUALITY",
     "stream_fps": "VISION_STREAM_FPS",
+    "stream_max_width": "VISION_STREAM_MAX_WIDTH",
 }
 
 
 def _coerce(value: Any, target_type: type) -> Any:
-    """String → richtigen Typ. Wird für Env-Variablen gebraucht."""
     if value is None:
         return None
     if target_type is bool:
@@ -121,85 +106,62 @@ def _coerce(value: Any, target_type: type) -> Any:
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
-    """config.yaml lesen, wenn vorhanden und PyYAML da ist. Sonst {}."""
     if not path.exists():
         return {}
     try:
         import yaml  # type: ignore
     except ImportError:
-        log.warning("%s gefunden, aber PyYAML nicht installiert — wird ignoriert.", path.name)
+        log.warning("%s gefunden, aber PyYAML fehlt — ignoriert.", path.name)
         return {}
     try:
         with path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except Exception as e:
-        log.warning("%s konnte nicht gelesen werden: %s — wird ignoriert.", path.name, e)
+        log.warning("%s nicht lesbar: %s — ignoriert.", path.name, e)
         return {}
     if not isinstance(data, dict):
-        log.warning(
-            "%s: Top-Level muss ein Mapping sein, ist %s — ignoriert.",
-            path.name, type(data).__name__,
-        )
+        log.warning("%s: Top-Level muss ein Mapping sein — ignoriert.", path.name)
         return {}
-    # Optional: unter 'visual:' verschachtelt, falls die Datei später team-übergreifend wird.
     if "visual" in data and isinstance(data["visual"], dict):
         return data["visual"]
     return data
 
 
-# ------------------------------------------------------------------ Build
-
 def load_config(yaml_path: Path | None = None) -> VisualConfig:
-    """Config zusammenbauen: Defaults < YAML < Env."""
     cfg = VisualConfig()
-    field_types = {f.name: f.type for f in fields(cfg)}
+    field_types = {f.name for f in fields(cfg)}
 
-    # 1) YAML-Layer
     yaml_file = yaml_path or (Path(__file__).parent / "config.yaml")
-    yaml_data = _load_yaml(yaml_file)
-    for name, value in yaml_data.items():
+    for name, value in _load_yaml(yaml_file).items():
         if name not in field_types:
             log.warning("Unbekanntes Feld in %s: %r — ignoriert.", yaml_file.name, name)
             continue
-        # type-string in echten Typ auflösen ist tricky; nutzen Default-Wert als Hinweis
-        default_val = getattr(cfg, name)
         try:
-            setattr(cfg, name, _coerce(value, type(default_val)))
+            setattr(cfg, name, _coerce(value, type(getattr(cfg, name))))
         except (ValueError, TypeError) as e:
-            log.warning("YAML-Wert für %s=%r ungültig: %s — Default beibehalten.", name, value, e)
+            log.warning("YAML-Wert %s=%r ungültig: %s", name, value, e)
 
-    # 2) Env-Layer
     for name, env_var in _ENV_MAP.items():
         raw = os.environ.get(env_var)
         if raw is None:
             continue
-        default_val = getattr(cfg, name)
         try:
-            setattr(cfg, name, _coerce(raw, type(default_val)))
+            setattr(cfg, name, _coerce(raw, type(getattr(cfg, name))))
         except (ValueError, TypeError) as e:
-            log.warning("Env %s=%r ungültig: %s — vorigen Wert beibehalten.", env_var, raw, e)
+            log.warning("Env %s=%r ungültig: %s", env_var, raw, e)
 
-    # detector_mode normalisieren (lower, leerstring statt None)
     cfg.detector_mode = (cfg.detector_mode or "").strip().lower()
-
     cfg.validate()
     return cfg
 
 
-# Modulweite Instanz — wird beim ersten Import gebaut.
 CONFIG: VisualConfig = load_config()
 
 
-# ------------------------------------------------------------------ Debug-Helper
-
 def _print_config() -> None:
-    # Bewusst print() statt logging: das ist die CLI-Ausgabe von
-    # `python config.py` und soll immer auf stdout landen, unabhängig vom
-    # Log-Level.
     print("Aktive Visual-Konfiguration:")
     for k, v in asdict(CONFIG).items():
-        env = _ENV_MAP.get(k, "—")
-        print(f"  {k:25s} = {v!r:25s}  (Env: {env})")
+        print(f"  {k:25s} = {v!r:25s}  (Env: {_ENV_MAP.get(k, '—')})")
 
 
 if __name__ == "__main__":

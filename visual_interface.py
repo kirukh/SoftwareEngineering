@@ -8,7 +8,7 @@ from typing import Callable, Protocol
 
 @dataclass
 class VisionResult:
-    """Ergebnis eines einzelnen Frames."""
+    """Ergebnis eines einzelnen Frames. Koordinaten normiert auf 0.0–1.0."""
     name: str
     found: bool
     confidence: float
@@ -18,12 +18,11 @@ class VisionResult:
     h: float | None = None
 
 
-# Detector-Callback pro Frame. visual.py registriert hier seinen Window-Append.
 FrameCallback = Callable[[VisionResult], None]
 
 
 class DetectorProtocol(Protocol):
-    """Detector im Streaming-Modus. Läuft bis stop_event gesetzt wird."""
+    """Detector im Streaming-Modus. Läuft, bis stop_event gesetzt wird."""
 
     def stream(
         self,

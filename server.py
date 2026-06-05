@@ -1,14 +1,14 @@
-"""HTTP-Server für die Kommunikation mit dem Controller.
+"""HTTP-Server des Visual-Moduls (Pi 5 / Laptop-Fallback).
 
-FastAPI auf 127.0.0.1:7995 (Default). Endpoints:
-    POST   /track/start    Body: {"name": "cell phone"}
-    GET    /track/latest   aggregiertes Window-Ergebnis
-    POST   /track/stop     Tracking beenden
-    GET    /health         Server-Check (inkl. aktiver Detector + ready-Flag)
-    GET    /stream         MJPEG-Live-Stream mit eingezeichneten Boxen
+Endpoints:
+    POST /track/start    {"name": "cell phone"}      Controller-Team
+    GET  /track/latest   aggregiertes Window-Ergebnis Controller-Team
+    POST /track/stop     Tracking beenden             Controller-Team
+    GET  /health         Status + aktiver Detector + ready
+    GET  /stream         MJPEG-Live-Stream mit Boxen  Audio-Team
+    GET  /               Browser-Dashboard zum Testen
 
-Konfiguration: siehe config.py (Defaults < config.yaml < Env-Variablen).
-Aktive Werte anzeigen: `python config.py`.
+Konfiguration: siehe config.py. Aktive Werte: ``python config.py``.
 """
 from __future__ import annotations
 
@@ -16,20 +16,15 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-# Logging einmalig konfigurieren, BEVOR die Module unten importiert werden,
-# damit ihre Log-Ausgaben (config-Warnungen, Detector-Wahl, prewarm) sichtbar
-# sind. basicConfig ist idempotent — ein evtl. später folgendes uvicorn-Setup
-# überschreibt es nicht.
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger("visual.server")
 
+import cv2
+import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel, field_validator
 
 import visual
 from config import CONFIG
@@ -38,31 +33,18 @@ from frame_buffer import FRAME_BUFFER
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Detector beim Server-Start vorladen, damit /health erst antwortet wenn
-    # alles bereit ist und der erste /track/start nicht in einen Timeout läuft.
     log.info("Detector wird vorgeladen...")
     try:
         visual.prewarm()
         log.info("Bereit. Aktiver Detector: %s", visual.active_detector())
     except Exception as e:
-        # Prewarm-Fehler nicht den Server-Start abbrechen lassen — das wäre
-        # schlecht im Rollout. Stattdessen loggen, /health meldet dann
-        # status='degraded' / ready=false, und der erste /track/start liefert
-        # den eigentlichen Fehler.
         log.error("Prewarm fehlgeschlagen: %s", e, exc_info=True)
     yield
     visual.stop_tracking()
 
 
-app = FastAPI(
-    title="visual_api",
-    description="Tracking-API für das Visual-Modul",
-    version="0.5.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="Visual API (Pi 5 / Laptop-Fallback)", version="1.0.0", lifespan=lifespan)
 
-
-# ------------------------------------------------------------------ Schemas
 
 class TrackStartReq(BaseModel):
     name: str
@@ -75,117 +57,54 @@ class TrackStartReq(BaseModel):
         return v.strip()
 
 
-class TrackStartRes(BaseModel):
-    status: str
-    name: str
-
-
-class TrackLatestRes(BaseModel):
-    status: str  # 'idle' | 'running'
-    name: str | None = None
-    found: bool | None = None
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    x: float | None = Field(default=None, ge=0.0, le=1.0)
-    y: float | None = Field(default=None, ge=0.0, le=1.0)
-    w: float | None = Field(default=None, ge=0.0, le=1.0)
-    h: float | None = Field(default=None, ge=0.0, le=1.0)
-
-
-class TrackStopRes(BaseModel):
-    status: str
-    was_running: bool
-
-
-class HealthRes(BaseModel):
-    status: str           # 'ok' wenn ein Detector geladen ist, sonst 'degraded'
-    detector: str         # 'hailo' | 'yolo' | 'none' | ...
-    ready: bool           # True wenn Detection tatsächlich bereit ist
-
-
-# ------------------------------------------------------------------ Endpoints
-
-@app.post("/track/start", response_model=TrackStartRes, summary="Tracking starten")
-def track_start(request: TrackStartReq) -> TrackStartRes:
+@app.post("/track/start", summary="Tracking starten")
+def track_start(req: TrackStartReq) -> dict:
     try:
-        return TrackStartRes(**visual.start_tracking(request.name))
+        return visual.start_tracking(req.name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/track/latest", response_model=TrackLatestRes, summary="Aktuelles Tracking-Ergebnis")
-def track_latest() -> TrackLatestRes:
-    return TrackLatestRes(**visual.get_latest())
+@app.get("/track/latest", summary="Aktuelles Tracking-Ergebnis")
+def track_latest() -> dict:
+    return visual.get_latest()
 
 
-@app.post("/track/stop", response_model=TrackStopRes, summary="Tracking beenden")
-def track_stop() -> TrackStopRes:
-    return TrackStopRes(**visual.stop_tracking())
+@app.post("/track/stop", summary="Tracking beenden")
+def track_stop() -> dict:
+    return visual.stop_tracking()
 
 
-@app.get("/health", response_model=HealthRes, summary="Server-Health-Check")
-def health() -> HealthRes:
-    """Health- und Readiness-Check.
-
-    Wichtig für das Controller-Team: HTTP 200 heißt nur "Server läuft". Ob
-    Detection wirklich bereit ist (prewarm erfolgreich, ein Detector geladen),
-    steht im `ready`-Flag bzw. an `status`:
-      - ready=true,  status="ok"        → losgehen
-      - ready=false, status="degraded"  → Server up, aber kein Detector
-        (z.B. prewarm fehlgeschlagen). Ein /track/start würde 500 liefern.
-    """
-    detector = visual.active_detector()
-    ready = detector not in ("", "none")
-    return HealthRes(
-        status="ok" if ready else "degraded",
-        detector=detector,
-        ready=ready,
-    )
+@app.get("/health", summary="Server-Health-Check")
+def health() -> dict:
+    detector, ready = visual.get_health_status()
+    return {"status": "ok", "detector": detector, "ready": ready}
 
 
-# ------------------------------------------------------------------ MJPEG-Stream
-
-# Multipart-Boundary für den MJPEG-Stream. Beliebiger Marker-String, muss
-# nur zwischen Header und Frames konsistent sein.
 _BOUNDARY = "visualframe"
+_PLACEHOLDER_JPEG = cv2.imencode(".jpg", np.full((480, 640, 3), 64, dtype=np.uint8))[1].tobytes()
 
-# Ein simples 1x1-Platzhalter-JPEG (grau), das ausgeliefert wird, solange
-# noch kein echter Frame da ist (z.B. /stream geöffnet, aber kein Tracking
-# aktiv). So sieht der Client sofort etwas und nicht einen Verbindungsfehler.
-_PLACEHOLDER_JPEG = bytes.fromhex(
-    "ffd8ffe000104a46494600010100000100010000ffdb00430008060607060508"
-    "0707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720"
-    "222c231c1c2837292c30313434341f27393d38323c2e333432ffc00011080001"
-    "000103012200021101031101ffc4001f0000010501010101010100000000000000"
-    "000102030405060708090a0bffc400b5100002010303020403050504040000017d"
-    "01020300041105122131410613516107227114328191a1082342b1c11552d1f024"
-    "33627282090a161718191a25262728292a3435363738393a434445464748494a53"
-    "5455565758595a636465666768696a737475767778797a838485868788898a9293"
-    "9495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9"
-    "cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffda00"
-    "0c03010002110311003f00fbfeffd9"
-)
+
+def _encode_jpeg(frame: np.ndarray) -> bytes | None:
+    max_w = CONFIG.stream_max_width
+    if max_w and frame.shape[1] > max_w:
+        scale = max_w / frame.shape[1]
+        frame = cv2.resize(frame, (max_w, int(frame.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG.stream_jpeg_quality])
+    return buf.tobytes() if ok else None
 
 
 async def _mjpeg_generator():
-    """Async-Generator: liefert fortlaufend JPEG-Frames im Multipart-Format.
-
-    Liest nur aus dem FRAME_BUFFER — öffnet KEINE Kamera. Die Frames werden
-    vom laufenden Detector-Stream dort abgelegt. Läuft kein Tracking, wird
-    der Platzhalter-Frame gesendet, damit die Verbindung nicht abreißt.
-    """
+    """Liefert fortlaufend JPEG-Frames aus dem FRAME_BUFFER (keine eigene Kamera),
+    gedrosselt auf stream_fps. Ohne Tracking geht der Platzhalter raus."""
     last_seq = -1
-    # Mindestabstand zwischen zwei Frames, begrenzt die Bandbreite.
     min_interval = 1.0 / CONFIG.stream_fps
-
     while True:
-        # Auf einen neuen Frame warten (max. 1s), damit der Stream auch
-        # ohne aktives Tracking am Leben bleibt.
-        jpeg, seq = await asyncio.to_thread(
-            FRAME_BUFFER.wait_for_frame, last_seq, 1.0
-        )
+        frame, seq = await asyncio.to_thread(FRAME_BUFFER.wait_for_frame, last_seq, 1.0)
         last_seq = seq
-
-        payload = jpeg if jpeg is not None else _PLACEHOLDER_JPEG
+        payload = await asyncio.to_thread(_encode_jpeg, frame) if frame is not None else None
+        if payload is None:
+            payload = _PLACEHOLDER_JPEG
         yield (
             b"--" + _BOUNDARY.encode() + b"\r\n"
             b"Content-Type: image/jpeg\r\n"
@@ -197,23 +116,66 @@ async def _mjpeg_generator():
 
 @app.get("/stream", summary="MJPEG-Live-Stream mit eingezeichneten Boxen")
 def stream() -> StreamingResponse:
-    """MJPEG-Stream der annotierten Kamerabilder.
-
-    Im Browser direkt einbettbar:  <img src="http://<pi-ip>:7995/stream">
-
-    Für Tkinter (Audio-Team): kein natives Rendering — der Stream muss in
-    einem Hintergrund-Thread selbst geparst werden. Siehe tkinter_stream_example.py.
-
-    Hinweis: Der Stream zeigt nur dann Boxen/Bewegung, wenn Tracking aktiv
-    ist (POST /track/start). Ohne Tracking kommt ein Platzhalter-Bild.
-    """
     return StreamingResponse(
         _mjpeg_generator(),
         media_type=f"multipart/x-mixed-replace; boundary={_BOUNDARY}",
     )
 
 
-# ------------------------------------------------------------------ Main
+@app.get("/", response_class=HTMLResponse, summary="Browser-Dashboard")
+def dashboard() -> str:
+    return """
+    <!DOCTYPE html>
+    <html lang="de">
+    <head>
+        <meta charset="utf-8">
+        <title>Visual-Modul — Steuerung</title>
+        <style>
+            body { font-family: system-ui, Arial, sans-serif; text-align: center;
+                   background: #1e1e22; color: #eee; margin: 0; padding: 24px; }
+            .wrap { max-width: 760px; margin: auto; }
+            img { width: 640px; max-width: 100%; border: 3px solid #444;
+                  border-radius: 8px; background: #000; }
+            input { padding: 10px; font-size: 16px; width: 220px; border-radius: 6px; border: 1px solid #666; }
+            button { padding: 10px 20px; font-size: 16px; margin: 8px; cursor: pointer;
+                     border: none; border-radius: 6px; color: #fff; }
+            .start { background: #28a745; } .stop { background: #dc3545; }
+            #status { margin-top: 14px; font-weight: 600; color: #ffc107; }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <h1>Visual-Modul — Live-Test</h1>
+            <img src="/stream" alt="Live-Stream">
+            <div>
+                <input id="obj" value="person" placeholder="COCO-Label, z.B. cell phone">
+                <button class="start" onclick="start()">Start</button>
+                <button class="stop" onclick="stop()">Stop</button>
+            </div>
+            <div id="status">Status: bereit</div>
+        </div>
+        <script>
+            const s = (t) => document.getElementById('status').innerText = "Status: " + t;
+            async function start() {
+                const name = document.getElementById('obj').value;
+                s("starte '" + name + "'...");
+                const res = await fetch('/track/start', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name})
+                });
+                if (!res.ok) { s("Fehler beim Start (" + res.status + ")"); return; }
+                s("tracke '" + (await res.json()).name + "'");
+            }
+            async function stop() {
+                s("stoppe...");
+                await fetch('/track/stop', {method: 'POST'});
+                s("gestoppt (idle)");
+            }
+        </script>
+    </body>
+    </html>
+    """
+
 
 if __name__ == "__main__":
     log.info("Starte auf %s:%s", CONFIG.host, CONFIG.port)
