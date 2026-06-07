@@ -2,6 +2,7 @@
 
     start_tracking(name)   Detector im Hintergrund starten
     get_latest()           aktuelles aggregiertes Window-Ergebnis
+                           (idle | starting | running)
     stop_tracking()        Detector beenden
     prewarm()              Modell vorladen (vom Server beim Start)
     get_health_status()    (detector_name, ready) für /health
@@ -185,11 +186,25 @@ def _run_stream(detector: DetectorProtocol, name: str, stop_event: threading.Eve
 
 
 def get_latest() -> dict:
+    """Aktueller Zustand: idle | starting | running.
+
+    starting = Thread läuft, aber der Detector hat noch keinen Frame geliefert
+    (leeres Window) → Kamera/GStreamer-Pipeline fährt noch hoch. So kann der
+    Controller "fährt hoch" von "läuft, nichts erkannt" unterscheiden.
+    """
     with _tracking_lock:
         running = _tracking_thread is not None and _tracking_thread.is_alive()
         name = _current_name or ""
+
     if not running:
         return {"status": "idle"}
+
+    with _window_lock:
+        warming_up = len(_window) == 0
+
+    if warming_up:
+        return {"status": "starting", "name": name}
+
     return {"status": "running", **_aggregate(name)}
 
 
