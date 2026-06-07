@@ -1,45 +1,28 @@
-# testing.md — Visual-Modul lokal testen (ohne Pi)
+# TESTING.md — Visual-Modul lokal testen (ohne Pi)
 
-Diese Anleitung beschreibt, wie ihr das Visual-Modul auf einem normalen
-Rechner (Laptop/Desktop, Windows oder Linux/macOS) testet — also den
-kompletten **YOLO-Pfad**: Server, Tracking, MJPEG-Stream.
+Wie ihr das Visual-Modul auf einem normalen Rechner (Windows oder Linux/macOS)
+testet — den kompletten **YOLO-Pfad**: Server, Tracking, MJPEG-Stream, Dashboard.
 
-Der **Hailo-Pfad** lässt sich nur auf dem Pi testen und ist hier nicht
-abgedeckt (siehe `testing.md`, Abschnitt 10, Task T-20).
-
-Befehle sind in zwei Varianten angegeben:
-**Linux / macOS** und **Windows (PowerShell)**.
-
----
+Der **Hailo-Pfad** läuft nur auf dem Pi (siehe `Anleitung.md`).
 
 ## 0. Voraussetzungen
 
-- Eine funktionierende Webcam (YOLO nutzt sie als Bildquelle).
+- Funktionierende Webcam (YOLO nutzt sie als Bildquelle).
 - Python 3 mit `pip`.
-- Abhängigkeiten installiert:
-
+- Abhängigkeiten:
 ```bash
 pip install -r requirements.txt
-pip install pillow          # nur für das Tkinter-Stream-Beispiel
+pip install pillow          # nur fürs Tkinter-Stream-Beispiel
 ```
-
-`tkinter` selbst ist im offiziellen Installer von python.org enthalten.
-Falls Python aus dem Microsoft Store stammt und `tkinter` fehlt
-(`ModuleNotFoundError: tkinter`), die python.org-Installation nutzen.
-
----
+Falls `tkinter` fehlt (Python aus dem Microsoft Store): die python.org-Installation nutzen.
 
 ## 1. Config prüfen
 
 ```bash
 python config.py
 ```
-
-In der Ausgabe sollten unten die beiden Stream-Felder auftauchen:
-`stream_jpeg_quality` und `stream_fps`. Wenn sie da sind, ist die
-aktuelle `config.py` korrekt eingespielt.
-
----
+Unten sollten die Stream-Felder auftauchen (`stream_jpeg_quality`, `stream_fps`,
+`stream_max_width`) — dann ist die aktuelle `config.py` aktiv.
 
 ## 2. Server starten (YOLO erzwingen)
 
@@ -47,156 +30,64 @@ aktuelle `config.py` korrekt eingespielt.
 ```bash
 VISUAL_DETECTOR=yolo python server.py
 ```
-
 **Windows (PowerShell):**
 ```powershell
-$env:VISUAL_DETECTOR="yolo"
-python server.py
+$env:VISUAL_DETECTOR="yolo"; python server.py
 ```
 
-**Windows (cmd):**
-```cmd
-set VISUAL_DETECTOR=yolo
-python server.py
-```
+`VISUAL_DETECTOR=yolo` ist auf dem Laptop wichtig, sonst probiert der Auto-Modus
+zuerst Hailo. Beim allerersten Start lädt `ultralytics` einmalig `yolov8n.pt`
+herunter. Wenn `Bereit. Aktiver Detector: yolo` erscheint, läuft der Server.
 
-`VISUAL_DETECTOR=yolo` ist auf dem Laptop wichtig — ohne das würde der
-Auto-Modus zuerst Hailo probieren. Beim allerersten Start lädt
-`ultralytics` einmalig das Modell `yolov8n.pt` herunter (kurz warten).
+## 3. Dashboard im Browser (schnellster Check)
 
-Wenn in der Konsole sinngemäß `Bereit. Aktiver Detector: yolo` steht,
-läuft der Server auf `127.0.0.1:7995`. Dieses Terminal offen lassen.
+Öffne `http://127.0.0.1:7995/` im Browser. Du siehst den Live-Stream (zunächst
+grau, weil kein Tracking läuft) und ein Eingabefeld mit Start/Stop-Buttons. Tippe
+`person` ein und klick **Start** — sobald du im Bild bist, erscheint eine Box,
+die dir folgt, und der Status zeigt `tracke 'person'`.
 
----
+Alternativ nur den reinen Stream: `http://127.0.0.1:7995/stream`.
 
-## 3. Stream im Browser ansehen (schneller Check)
+## 4. Tracking per curl (optional)
 
-Auch wenn das Audio-Team Tkinter benutzt — für den Test ist der Browser
-am schnellsten, weil er MJPEG nativ rendert. Im Browser öffnen:
-
-```
-http://127.0.0.1:7995/stream
-```
-
-Erwartung: zuerst ein **graues Platzhalterbild**. Das ist korrekt — es
-läuft noch kein Tracking. Tab offen lassen.
-
----
-
-## 4. Tracking starten
-
-In einem **zweiten Terminal**:
-
-**Linux / macOS:**
 ```bash
 curl -X POST http://127.0.0.1:7995/track/start \
-     -H "Content-Type: application/json" \
-     -d '{"name": "person"}'
-```
-
-**Windows (PowerShell):**
-```powershell
-curl -X POST http://127.0.0.1:7995/track/start -H "Content-Type: application/json" -d "{\"name\": \"person\"}"
-```
-
-`"person"` ist das zuverlässigste COCO-Label zum Ausprobieren — einfach
-in die Webcam schauen.
-
-> Alternative ohne Kommandozeile: `http://127.0.0.1:7995/docs` im Browser
-> öffnen und `track/start` per "Try it out" anklicken. Praktisch unter
-> Windows, wenn das curl-Quoting zickt.
-
-Jetzt sollte der Browser-Tab aus Schritt 3 von grau auf Live-Video
-umschalten, und sobald du im Bild bist, erscheint eine Box mit `person`
-und einem Confidence-Wert, die dir folgt.
-
-Parallel das Tracking-Ergebnis pollen (drittes Terminal oder `/docs`):
-
-```bash
+     -H "Content-Type: application/json" -d '{"name": "person"}'
 curl http://127.0.0.1:7995/track/latest
-```
-
-Erwartung: `found: true` mit `x`/`y`/`w`/`h`, sobald du erkannt wirst.
-
----
-
-## 5. Tracking stoppen
-
-**Linux / macOS:**
-```bash
 curl -X POST http://127.0.0.1:7995/track/stop
 ```
+`"person"` ist das zuverlässigste COCO-Label zum Ausprobieren. Erwartung bei
+`/track/latest`: `found: true` mit `x`/`y`/`w`/`h`, sobald du erkannt wirst.
 
-**Windows (PowerShell):**
-```powershell
-curl -X POST http://127.0.0.1:7995/track/stop
-```
+## 5. Tkinter-Test (der echte Audio-Team-Weg)
 
-Der Browser-Tab fällt zurück auf das graue Platzhalterbild — der Puffer
-wird beim Stop geleert, damit kein altes Bild einfriert. Auch das ist
-korrektes Verhalten.
-
----
-
-## 6. Tkinter-Test (der echte Audio-Team-Weg)
-
-Der Browser-Test zeigt, dass der Server läuft. Das Audio-Team hat aber
-Tkinter, das MJPEG nicht nativ rendert. Bei laufendem Server, neues
-Terminal:
-
+Bei laufendem Server, neues Terminal:
 ```bash
 python tkinter_stream_example.py
 ```
+Es öffnet sich ein Fenster mit demselben Live-Video wie im Browser. Startest du
+das Fenster vor dem Tracking, zeigt es erst den Platzhalter und schaltet
+automatisch auf Video um, sobald `track/start` aufgerufen wird. Genau dieses
+Skript ist die Vorlage für die Audio-Seite.
 
-Es öffnet sich ein Fenster. Läuft Tracking (Schritt 4), erscheint dort
-dasselbe Live-Video mit Boxen wie im Browser. Öffnest du das Fenster
-vor dem Tracking-Start, zeigt es erst den Platzhalter und schaltet
-automatisch auf Video um, sobald `track/start` aufgerufen wird — kein
-Neustart von Tkinter nötig.
-
-Genau dieses Skript ist die Vorlage für die Audio-Seite. Läuft es bei
-dir, läuft es bei kiru und Schlief auch.
-
----
-
-## 7. Automatische Tests
+## 6. Automatische Tests
 
 ```bash
 python test_visual.py            # Fake-Tests, ohne Hardware/Kamera
-python test_visual.py --server   # zusätzlich HTTP-Endpoints (mit Fake-Detector)
+python test_visual.py --server   # zusätzlich HTTP-Endpoints (Fake-Detector)
 ```
 
-Diese Tests brauchen keine Webcam — sie nutzen Fake-Detektoren.
-
----
-
-## 8. Wenn etwas klemmt
+## 7. Wenn etwas klemmt
 
 | Symptom | Ursache / Lösung |
 |---|---|
-| `/stream` bleibt grau, obwohl Tracking läuft | Server-Log prüfen. `Frame-Encoding fehlgeschlagen` → Encoding-Problem. `found` auch in `/track/latest` nie `true` → Kamera sieht dich nicht (Licht, Index) |
-| `found` wird nie `true` | Falscher Kamera-Index oder Objekt nicht erkannt. Index ändern (s.u.) |
-| `httpx.ConnectError` / `curl: connection refused` | Server läuft nicht oder falscher Port |
-| `ModuleNotFoundError: tkinter` | Python aus Microsoft Store ohne tkinter — python.org-Installation nutzen |
-| Stream ruckelt / niedrige Bildrate | Normal: YOLOv8n auf CPU ist nicht flüssig. Kein Code-Fehler |
+| Dashboard bleibt grau, obwohl Tracking läuft | Kamera sieht dich nicht (Licht, Index). `/track/latest` auch nie `found:true`? → `VISION_CAMERA_INDEX` ändern |
+| `found` wird nie `true` | falscher Kamera-Index oder Objekt nicht erkannt |
+| `connection refused` | Server läuft nicht oder falscher Port |
+| `address already in use` | alter Prozess hält den Port: `fuser -k 7995/tcp` (Linux) bzw. Prozess im Task-Manager beenden |
+| Stream ruckelt | YOLOv8n auf CPU ist nicht flüssig — normal, kein Code-Fehler. Auf dem Pi mit Hailo ist es flüssig |
 
-**Kamera-Index ändern**, falls die falsche Kamera genommen wird:
-
-Linux / macOS:
+**Kamera-Index ändern:**
 ```bash
 VISION_CAMERA_INDEX=1 VISUAL_DETECTOR=yolo python server.py
 ```
-Windows (PowerShell):
-```powershell
-$env:VISION_CAMERA_INDEX="1"; $env:VISUAL_DETECTOR="yolo"; python server.py
-```
-
----
-
-## Erwartungs-Check
-
-- YOLOv8n auf einer Laptop-CPU läuft mit **spürbarer, nicht flüssiger**
-  Bildrate. Das ist normal und kein Fehler. Auf dem Pi mit Hailo wäre es
-  flüssiger.
-- Der **Hailo-Stream** ist mit diesem Setup **nicht** testbar — dafür
-  braucht es den Pi und den noch offenen Task T-20.

@@ -1,9 +1,11 @@
 # Anleitung: Visual-Server starten & einbinden
 
-Diese Anleitung erklärt, wie der Visual-Server auf dem Pi gestartet wird und wie ihr (Controller-Team) ihn aus eurem Code anspricht. Sprint-Ziel: Roboter findet ein vom Audio-Team gemeldetes Objekt und liefert die Koordinaten zurück.
+Wie der Visual-Server auf dem Pi gestartet wird und wie ihr (Controller-Team)
+ihn aus eurem Code ansprecht. Sprint-Ziel: Roboter findet ein vom Audio-Team
+gemeldetes Objekt und liefert die Koordinaten zurück.
 
 Für die **Bildübertragung** (MJPEG-Stream ans Audio-Team) siehe Abschnitt 10.
-Für das **lokale Testen ohne Pi** siehe die separate [`testing.md`](testing.md).
+Für das **lokale Testen ohne Pi** siehe [`TESTING.md`](TESTING.md).
 
 ## TL;DR für das Controller-Team
 
@@ -15,74 +17,45 @@ with VisualClient(base_url="http://127.0.0.1:7995") as visual:
     while suche_läuft:
         r = visual.latest()
         if r["status"] == "running" and r["found"]:
-            # Treffer! r["x"], r["y"], r["w"], r["h"] sind 0.0–1.0
-            controller.handle_found(r)
+            controller.handle_found(r)  # r["x"], r["y"], r["w"], r["h"] sind 0.0–1.0
             break
         time.sleep(0.1)
-    # stop() wird automatisch beim Verlassen aufgerufen
+    # stop() wird beim Verlassen automatisch aufgerufen
 ```
-
-Das ist alles. Details unten.
-
----
 
 ## 1. Vorbereitung auf dem Pi
 
-### 1.1 Repo + Dependencies
-
 ```bash
 git clone <unser-repo>
-cd visual/
-pip install -r requirements.txt
+cd SoftwareEngineering/
 ```
 
-Auf dem Pi ist zusätzlich der Hailo-Stack installiert (das macht der Pi-Setup-Script vom Team — fragt Christian, wenn das auf einem frischen Pi gemacht werden muss).
-
-### 1.2 YOLO-Modell laden (Fallback)
-
-Beim ersten YOLO-Start zieht `ultralytics` das `yolov8n.pt`-Modell von sich aus runter. Das dauert kurz, ist aber einmalig. Wenn das Pi später offline laufen soll, einmal vorab online starten.
-
-### 1.3 Config prüfen
-
-```bash
-python config.py
-```
-
-Zeigt die aktiven Werte. Falls etwas nicht stimmt: über Env-Variablen anpassen oder über eine `config.yaml` (siehe Abschnitt 7).
-
-Linux / macOS — einzelner Lauf auf anderem Port:
-```bash
-VISUAL_PORT=7996 python server.py
-```
-Windows (PowerShell):
-```powershell
-$env:VISUAL_PORT="7996"; python server.py
-```
+Der Hailo-Stack wird über das hailo-apps-Setup installiert (`sudo ./install.sh`
+im hailo-apps-Repo). Fragt Christian, wenn das auf einem frischen Pi gemacht
+werden muss.
 
 ## 2. Server starten
 
-### Standardfall (alles auf dem Pi)
+### Auf dem Pi (Hailo)
+
+Hailo braucht die aktivierte hailo-apps-Umgebung — die setzt neben dem venv auch
+die nötigen GStreamer-/TAPPAS-Variablen:
 
 ```bash
-python server.py
+cd ~/hailo-apps && source setup_env.sh
+cd ~/SoftwareEngineering && python server.py
 ```
 
-Der Server lauscht auf `127.0.0.1:7995` und nimmt automatisch den besten Detector: Hailo, wenn das AI-Kit funktioniert, sonst YOLO als Fallback. Beim Start steht in der Konsole, welcher Detector aktiv ist.
+Der Server nimmt automatisch den besten Detector: Hailo, wenn das AI-Kit
+funktioniert, sonst YOLO als Fallback. Beim Start steht in der Konsole, welcher
+Detector aktiv ist.
 
-### Andere Geräte sollen zugreifen können
+### Netzwerk-Zugriff
 
-Wenn der Controller (oder das Audio-Team) auf einem anderen Gerät läuft und über Netzwerk auf den Pi zugreift:
-
-Linux / macOS:
-```bash
-VISUAL_HOST=0.0.0.0 python server.py
-```
-Windows (PowerShell):
-```powershell
-$env:VISUAL_HOST="0.0.0.0"; python server.py
-```
-
-Damit ist der Server unter `http://<pi-ip>:7995` aus dem lokalen Netzwerk erreichbar. Das ist insbesondere für den `/stream`-Endpoint nötig, wenn das Audio-Team auf einem anderen Rechner läuft (siehe Abschnitt 10).
+`host` bindet per Default auf `0.0.0.0`, der Server ist also unter
+`http://<pi-ip>:7995` aus dem lokalen Netz erreichbar (Pi-IP: `hostname -I`).
+Das ist für `/stream` nötig, wenn das Audio-Team auf einem anderen Rechner
+läuft. Nur lokal binden: `VISUAL_HOST=127.0.0.1 python server.py`.
 
 ### Detector erzwingen
 
@@ -92,254 +65,158 @@ Damit ist der Server unter `http://<pi-ip>:7995` aus dem lokalen Netzwerk erreic
 | Nur Hailo (fail wenn weg) | `VISUAL_DETECTOR=hailo python server.py` | `$env:VISUAL_DETECTOR="hailo"; python server.py` |
 | Nur YOLO (Webcam) | `VISUAL_DETECTOR=yolo python server.py` | `$env:VISUAL_DETECTOR="yolo"; python server.py` |
 
-> Windows-Hinweis: In PowerShell setzt `$env:NAME="wert"` die Variable für die
-> Sitzung. In der klassischen Eingabeaufforderung (cmd) stattdessen
-> `set NAME=wert`. Die beiden Syntaxen nicht vermischen.
-
 ## 3. HTTP-API
 
-Base URL: `http://127.0.0.1:7995` (oder `http://<pi-ip>:7995` bei `VISUAL_HOST=0.0.0.0`).
+Base URL: `http://127.0.0.1:7995` (oder `http://<pi-ip>:7995`).
 
 ### `POST /track/start`
-
 ```http
 POST /track/start
 Content-Type: application/json
 
 {"name": "cell phone"}
 ```
-
 → `{"status": "running", "name": "cell phone"}`
 
-**Wichtig:** `name` muss ein **gültiges COCO-Label** sein. Das Audio-Team mappt natürliche Sprache → COCO. Wir nehmen den Wert hier 1:1, ohne weiteres Mapping. Liste der COCO-Klassen: siehe `coco.yaml` (Single Source of Truth zwischen Audio- und Visual-Team).
-
-Idempotent:
-- Aufruf mit demselben Namen während Tracking läuft → no-op
-- Aufruf mit anderem Namen → altes Tracking wird gestoppt, neues gestartet
+`name` muss ein **gültiges COCO-Label** sein. Das Audio-Team mappt natürliche
+Sprache → COCO; wir nehmen den Wert 1:1. Idempotent: gleicher Name = no-op,
+anderer Name stoppt das alte Tracking und startet neu.
 
 ### `GET /track/latest`
-
-Aktuelles aggregiertes Ergebnis aus dem Sliding Window der letzten 8 Frames. Status-abhängig drei Formen:
-
-**Kein Tracking aktiv:**
+Aggregiertes Ergebnis aus dem Sliding Window. Drei Formen:
 ```json
 {"status": "idle"}
-```
 
-**Tracking läuft, aktuell nichts erkannt:**
-```json
-{
-  "status": "running", "name": "cell phone", "found": false,
-  "confidence": 0.0, "x": null, "y": null, "w": null, "h": null
-}
-```
+{"status": "running", "name": "cell phone", "found": false,
+ "confidence": 0.0, "x": null, "y": null, "w": null, "h": null}
 
-**Tracking läuft, Treffer:**
-```json
-{
-  "status": "running", "name": "cell phone", "found": true,
-  "confidence": 0.87,
-  "x": 0.51, "y": 0.48,
-  "w": 0.18, "h": 0.32
-}
+{"status": "running", "name": "cell phone", "found": true,
+ "confidence": 0.87, "x": 0.51, "y": 0.48, "w": 0.18, "h": 0.32}
 ```
-
-Alle Koordinaten sind auf 0.0–1.0 normiert (Bruchteile des Bildes, nicht Pixel).
+Alle Koordinaten normiert auf 0.0–1.0 (Bruchteile des Bildes, keine Pixel).
 
 ### `POST /track/stop`
-
-```http
-POST /track/stop
-```
-
-→ `{"status": "stopped", "was_running": true}`
-
-Idempotent — Aufruf ohne laufendes Tracking gibt `was_running: false`.
+→ `{"status": "stopped", "was_running": true}` (idempotent)
 
 ### `GET /health`
+→ `{"status": "ok", "detector": "hailo", "ready": true}`
 
-```http
-GET /health
-```
-
-→ `{"status": "ok", "detector": "hailo"}`
-
-`detector` ist `"hailo"`, `"yolo"`, oder `"none"` (Server noch nicht geprewarmt). Praktisch, um schnell zu prüfen, ob der Pi gerade Hailo oder Fallback fährt.
+`detector` ist `"hailo"`, `"yolo"` oder `"none"`. `ready=true`, sobald ein
+Detector geladen ist — `ready=false` heißt, ein `/track/start` würde noch
+fehlschlagen (Server fährt noch hoch).
 
 ### `GET /stream`
+MJPEG-Live-Stream mit Boxen. Details: Abschnitt 10.
 
-MJPEG-Live-Stream mit eingezeichneten Bounding-Boxen. Details und Einbindung: Abschnitt 10.
+### `GET /`
+Browser-Dashboard zum Selbsttesten (Live-Bild + Start/Stop).
 
 ## 4. Integration in den Controller
 
 ### Option A: `visual_client.py` direkt nutzen (empfohlen)
-
-`visual_client.py` ist eine fertige Python-Bibliothek, die alle Endpoints kapselt. Einfach in eurem Repo importieren:
 
 ```python
 from visual_client import VisualClient
 import time
 
 with VisualClient(base_url="http://127.0.0.1:7995") as visual:
-    # Healthcheck beim Verbinden:
-    if not visual.health():
-        raise RuntimeError("Visual-Server nicht erreichbar")
-
-    # Tracking starten (Label vom Audio-Team):
+    if not visual.ready():
+        raise RuntimeError("Visual-Server nicht bereit")
     visual.start("cell phone")
-
-    # Polling-Loop:
     while controller_state == "searching":
         r = visual.latest()
         if r["status"] == "running" and r["found"]:
             handle_found(r["x"], r["y"], r["w"], r["h"], r["confidence"])
             break
         time.sleep(0.1)
-
-    # stop() wird vom Context-Manager automatisch gerufen
 ```
 
-### Option B: Roh-HTTP via `httpx`/`requests`
+### Option B: Roh-HTTP via `curl`
 
-Wenn ihr keinen Python-Import wollt, geht alles auch direkt per HTTP. Beispiel mit `curl`:
-
-Linux / macOS:
 ```bash
 curl -X POST http://127.0.0.1:7995/track/start \
-     -H "Content-Type: application/json" \
-     -d '{"name": "cell phone"}'
+     -H "Content-Type: application/json" -d '{"name": "cell phone"}'
 curl http://127.0.0.1:7995/track/latest
 curl -X POST http://127.0.0.1:7995/track/stop
 ```
 
-Windows (PowerShell) — `curl` ist in Windows 10/11 enthalten, aber das
-JSON-Quoting ist anders (doppelte Anführungszeichen, innere escaped):
-```powershell
-curl -X POST http://127.0.0.1:7995/track/start -H "Content-Type: application/json" -d "{\"name\": \"cell phone\"}"
-curl http://127.0.0.1:7995/track/latest
-curl -X POST http://127.0.0.1:7995/track/stop
-```
-
-> Tipp: Wenn das Quoting nervt, einfach `http://127.0.0.1:7995/docs` im
-> Browser öffnen — die FastAPI-Oberfläche lässt alle Endpoints per Klick
-> ausführen, ganz ohne Kommandozeile.
+> Tipp: `http://127.0.0.1:7995/docs` im Browser öffnen — die FastAPI-Oberfläche
+> lässt alle Endpoints per Klick ausführen.
 
 ## 5. Polling-Verhalten
 
-- **Empfohlene Polling-Rate: 100 ms.** Schneller bringt nichts, weil das Sliding Window erst alle ~250 ms (Hailo) bzw. ~500 ms (YOLO) ein neues aggregiertes Ergebnis liefert.
-- **Polling ist günstig** — nur ein HTTP GET, keine Berechnung serverseitig.
-- **`found=True` ist stabil**: Mindestens 5 von 8 Frames im Fenster müssen das Objekt erkannt haben. Das filtert YOLO-/Hailo-Jitter raus.
+- **Empfohlene Rate: 100 ms.** Schneller bringt nichts, weil das Window erst
+  alle paar hundert ms ein neues aggregiertes Ergebnis liefert.
+- **`found=true` ist stabil:** mind. 5 von 8 Frames im Fenster müssen das Objekt
+  erkannt haben. Das filtert Jitter raus.
+- **Stale-Guard:** kommt seit `stale_after_seconds` (Default 1.5s) kein neuer
+  Frame, meldet `/track/latest` `found=false` — kein eingefrorener alter Treffer.
 
 ## 6. Typische Probleme
 
 | Symptom | Vermutliche Ursache |
 |---|---|
-| `httpx.ConnectError` | Server nicht gestartet, oder falscher Host/Port |
-| Connection refused von anderem Gerät | `VISUAL_HOST=127.0.0.1` (Default) blockt von außen. Mit `VISUAL_HOST=0.0.0.0` starten |
-| `found` wird nie `true` | (1) Falsches Label — `"smartphone"` statt `"cell phone"`. (2) Objekt nicht im Sichtfeld. (3) Konfidenz zu niedrig — `confidence_min` runtersetzen |
-| `/health` zeigt `detector: yolo` obwohl Hailo erwartet | Hailo-Init schlug fehl, Fallback griff. Server-Logs checken |
-| Erster `/track/start` braucht 10–30s | Normal: YOLO lädt das Modell. Mit Prewarm beim Server-Start abgedeckt |
-| `/stream` zeigt nur ein graues Bild | Kein Tracking aktiv — erst `POST /track/start`. Oder: Server läuft unter Hailo, dort ist der Stream noch nicht verifiziert (T-20, siehe Abschnitt 10) |
-| `ModuleNotFoundError: vision_interface` | Datei wurde in `visual_interface.py` umbenannt — Import anpassen |
-| Windows: Env-Variable wirkt nicht | In PowerShell `$env:NAME="wert"`, in cmd `set NAME=wert`. Gilt nur für die aktuelle Sitzung |
+| `httpx.ConnectError` | Server nicht gestartet, falscher Host/Port |
+| Connection refused von außen | mit `VISUAL_HOST=0.0.0.0` starten (ist Default) |
+| `found` wird nie `true` | falsches Label (`"smartphone"` statt `"cell phone"`), Objekt nicht im Bild, oder `confidence_min` zu hoch |
+| `/health` zeigt `detector: yolo` obwohl Hailo erwartet | Hailo-Init schlug fehl, Fallback griff. Logs checken |
+| `address already in use` beim Start | alter Prozess hält den Port: `fuser -k 7995/tcp`, dann neu starten |
+| `No module named 'hailo_apps...'` | Server ohne aktivierte hailo-apps-Umgebung gestartet → erst `source setup_env.sh` |
 
 ## 7. Konfiguration
 
-Alle Tuning-Parameter liegen in `config.py`. Drei Ebenen (späteres überschreibt früheres):
+Alle Parameter in `config.py`. Drei Ebenen: Defaults < `config.yaml` < Env.
+Aktive Werte: `python config.py`.
 
-1. **Defaults** im Code
-2. **`config.yaml`** im Repo-Root (optional)
-3. **Env-Variablen**
-
-### Alle Felder
-
-| Feld | Default | Env | Erlaubte Werte |
-|---|---|---|---|
-| `host` | `127.0.0.1` | `VISUAL_HOST` | IP oder Hostname |
-| `port` | `7995` | `VISUAL_PORT` | 7991–8000 |
-| `detector_mode` | `""` | `VISUAL_DETECTOR` | `""`, `"hailo"`, `"yolo"` |
-| `confidence_min` | `0.5` | `VISION_CONFIDENCE_MIN` | 0.0–1.0 |
-| `window_size` | `8` | `VISION_WINDOW_SIZE` | ≥ 1 |
-| `min_hits_in_window` | `5` | `VISION_MIN_HITS_IN_WINDOW` | 1–window_size |
-| `camera_index` | `0` | `VISION_CAMERA_INDEX` | ≥ 0 |
-| `model_path` | `yolov8n.pt` | `VISION_MODEL_PATH` | Pfad |
-| `stop_timeout_seconds` | `5.0` | `VISION_STOP_TIMEOUT_SECONDS` | > 0 |
-| `stream_jpeg_quality` | `80` | `VISION_STREAM_JPEG_QUALITY` | 1–100 |
-| `stream_fps` | `15` | `VISION_STREAM_FPS` | ≥ 1 |
-
-### `config.yaml` verwenden
-
-```bash
-cp config.yaml.example config.yaml
-pip install pyyaml
-nano config.yaml         # eigene Werte eintragen
-python config.py         # checken dass die Werte angenommen wurden
-python server.py
-```
-
-Env-Variablen überschreiben `config.yaml`.
-
-## 8. Lokal testen (ohne Pi)
-
-Kurzfassung: Server mit YOLO + Webcam laufen lassen.
-
-Linux / macOS:
-```bash
-VISUAL_DETECTOR=yolo python server.py
-```
-Windows (PowerShell):
-```powershell
-$env:VISUAL_DETECTOR="yolo"; python server.py
-```
-
-Dann gegen `http://127.0.0.1:7995` arbeiten. COCO-Label `"person"` ist am zuverlässigsten zum Probieren. **Ausführliche Schritt-für-Schritt-Anleitung inklusive Stream-Test: siehe [`testing.md`](testing.md).**
-
-## 9. Konfiguration für externen Zugriff
-
-Wenn das Audio-Team auf einem anderen Rechner läuft als der Visual-Server, muss der Server mit `VISUAL_HOST=0.0.0.0` gestartet werden (siehe Abschnitt 2), sonst sind weder API noch `/stream` von außen erreichbar.
+| Feld | Default | Env |
+|---|---|---|
+| `host` | `0.0.0.0` | `VISUAL_HOST` |
+| `port` | `7995` | `VISUAL_PORT` |
+| `detector_mode` | `""` | `VISUAL_DETECTOR` |
+| `confidence_min` | `0.5` | `VISION_CONFIDENCE_MIN` |
+| `window_size` | `8` | `VISION_WINDOW_SIZE` |
+| `min_hits_in_window` | `5` | `VISION_MIN_HITS_IN_WINDOW` |
+| `camera_index` | `0` | `VISION_CAMERA_INDEX` |
+| `model_path` | `yolov8n.pt` | `VISION_MODEL_PATH` |
+| `hailo_input` | `rpi` | `VISION_HAILO_INPUT` |
+| `hailo_hef_path` | `""` | `VISION_HAILO_HEF_PATH` |
+| `stop_timeout_seconds` | `5.0` | `VISION_STOP_TIMEOUT_SECONDS` |
+| `stale_after_seconds` | `1.5` | `VISION_STALE_AFTER_SECONDS` |
+| `stream_jpeg_quality` | `80` | `VISION_STREAM_JPEG_QUALITY` |
+| `stream_fps` | `15` | `VISION_STREAM_FPS` |
+| `stream_max_width` | `640` | `VISION_STREAM_MAX_WIDTH` |
 
 ## 10. Bildübertragung: `GET /stream`
 
-Der `/stream`-Endpoint liefert einen **MJPEG-Live-Stream** des Kamerabilds mit eingezeichneten Bounding-Boxen, Labels und Confidence-Werten. Gedacht für das Audio-Team, das das Bild in seiner Oberfläche anzeigen will.
+MJPEG-Live-Stream des Kamerabilds mit eingezeichneten Bounding-Boxen, Labels und
+Confidence. Für das Audio-Team.
 
 ### Verhalten
-
-- Der Stream zeigt **nur dann Boxen/Bewegung, wenn Tracking aktiv ist** (`POST /track/start` wurde aufgerufen). Ohne aktives Tracking kommt ein graues Platzhalterbild — die Verbindung bleibt offen.
-- Der Stream öffnet **keine eigene Kamera**. Er liefert die Frames aus, die der laufende Detector ohnehin produziert. Tracking und Stream teilen sich denselben Detector und dieselbe Kamera.
+- Boxen/Bewegung nur bei aktivem Tracking (`POST /track/start`). Ohne Tracking
+  ein graues Platzhalterbild — die Verbindung bleibt offen.
+- Der Stream öffnet **keine eigene Kamera**: er liefert die Frames aus, die der
+  laufende Detector ohnehin produziert (eine Kamera, ein Detector, zwei Ausgänge).
+- Frames werden serverseitig auf `stream_max_width` verkleinert und auf
+  `stream_fps` gedrosselt — für einen flüssigen, latenzarmen Live-View.
 
 ### Einbindung im Browser
-
-Trivial — der Browser rendert MJPEG nativ:
-
 ```html
 <img src="http://<pi-ip>:7995/stream">
 ```
 
 ### Einbindung in Tkinter (Audio-Team)
-
-Tkinter kann MJPEG **nicht** von selbst rendern. Der Multipart-Stream muss in einem Hintergrund-Thread geparst und Frame für Frame in ein `Label` gepusht werden. Eine **fertige, kopierbare Vorlage** liegt im Repo:
-
+Tkinter rendert MJPEG nicht nativ — der Multipart-Stream muss in einem
+Hintergrund-Thread geparst werden. Fertige Vorlage: `tkinter_stream_example.py`
+(braucht dort `pillow` und `httpx`):
 ```bash
-python tkinter_stream_example.py                       # Server auf localhost
-python tkinter_stream_example.py http://<pi-ip>:7995   # Server auf dem Pi
+python tkinter_stream_example.py http://<pi-ip>:7995
 ```
 
-Das Skript ist kein Teil des Servers, sondern Beispielcode für die Audio-Seite. Es braucht dort zusätzlich `pillow` (`pip install pillow`).
-
-### ⚠️ Aktueller Stand — bitte beachten
-
-Der `/stream`-Endpoint ist mit dem **YOLO-Detector vollständig getestet** (Laptop + Webcam: Stream liefert annotierte Frames, Box folgt dem Objekt).
-
-Der **Hailo-Pfad ist ein Entwurf und noch nicht am echten Pi verifiziert.** Der Abgriff des annotierten Frames aus der Hailo-GStreamer-Pipeline hängt am offenen Sprint-Task **T-20** (Hailo-Live-Test auf dem Pi). Solange T-20 nicht abgeschlossen ist:
-
-- Läuft der Server unter **YOLO** → `/stream` funktioniert.
-- Läuft der Server unter **Hailo** → `/stream` *kann* leer bleiben (graues Platzhalterbild). Das **Tracking** (`/track/*`) ist davon **nicht** betroffen und läuft mit Hailo normal.
-
-Ob der Stream für die Demo zwingend über Hailo laufen muss, ist eine offene Abstimmungsfrage (Team + Prof. Jehle). Bis dahin: für eine sichere Stream-Demo den Server mit `VISUAL_DETECTOR=yolo` starten.
+Der Stream funktioniert mit Hailo **und** YOLO.
 
 ## 11. Bekannte offene Punkte
 
-- **Hailo-Stream-Verifikation** (`/stream` unter Hailo) — hängt an T-20, Pi-Live-Test.
-- **Team-übergreifende Config-Datei** (alle Modul-Ports an einer Stelle): in Diskussion. Aktuell nur Visual.
+- **Team-übergreifende Config-Datei** (alle Modul-Ports an einer Stelle): in
+  Diskussion. Aktuell nur Visual.
 
-Bei Fragen oder Problemen: Slack-Channel `#team-visual` oder direkt Christian.
+Bei Fragen: Slack `#team-visual` oder direkt Christian.

@@ -1,177 +1,115 @@
-**Visual module — full change summary**
+# Visual module — change summary
 
-This is everything that changed in the Visual module since Sprint 1, in one place. Use it to plan your migration.
-
----
+Was sich im Visual-Modul geändert hat, an einer Stelle. Für die Migration auf
+Controller- und Audio-Seite.
 
 ## TL;DR
 
-The old in-process Python API (`from visual import search, ...`) is gone. The Visual module is now a standalone **HTTP server** (FastAPI on `127.0.0.1:7995`) that you talk to over the network. We ship a Python client (`visual_client.py`) so you don't have to write raw HTTP calls.
+Das Visual-Modul ist ein eigenständiger **HTTP-Server** (FastAPI auf
+`127.0.0.1:7995` bzw. `0.0.0.0:7995`). Statt einmaliger `search()`-Aufrufe läuft
+**kontinuierliches Tracking** im Hintergrund; ihr pollt das aktuelle aggregierte
+Ergebnis. Es gibt einen Python-Client (`visual_client.py`).
 
-The detection model also changed: instead of one-shot `search()` calls, the server runs **continuous tracking** in the background, and you poll the latest aggregated result.
+Zusätzlich: ein **MJPEG-Live-Stream** (`GET /stream`) fürs Audio-Team und ein
+**Browser-Dashboard** (`GET /`) zum Selbsttesten.
 
-There is also a new **MJPEG live-stream endpoint** (`GET /stream`) — but that one is **not for the controller**, it's for the audio team's UI. See the dedicated section below; it does not affect your tracking integration.
+> **Port:** 7995 (Range 7991–8000, Festlegung Prof. Jehle).
+> **Detector:** Auto-Fallback Hailo → YOLO. `GET /health` zeigt den aktiven an.
 
-> **Port:** Visual sits in the 7991–8000 range (assignment from Prof. Jehle). Default port is **7995**.
-> **Detector fallback:** if Hailo isn't available at runtime, the server silently falls back to YOLO so the rollout doesn't break. `GET /health` shows which one is active.
+## Neuester Stand (Sprint 4)
 
----
+- **Hailo-Stream funktioniert** auf dem Pi (T-20/T-30 erledigt). `/stream`
+  liefert annotierte Frames mit Hailo **und** YOLO. Der Frame-Abgriff läuft über
+  die hailo-apps-Helper aus der GStreamer-Pipeline (keine zweite Kamera).
+- **Flüssiger, latenzarmer Stream:** Pipeline-Queues auf „alte Frames verwerfen",
+  Frame-Abgriff auf `stream_fps` gedrosselt, Frames vor dem Encoding auf
+  `stream_max_width` verkleinert.
+- **`/health` liefert zusätzlich `ready`** — `true`, sobald ein Detector geladen
+  ist. `VisualClient.ready()` wertet das aus. Nutzt das beim Hochfahren statt nur
+  `health()` (das ist schon `true`, wenn der Server antwortet, der Detector aber
+  evtl. noch nicht bereit ist).
+- **Stale-Guard:** kommt seit `stale_after_seconds` (Default 1.5s) kein neuer
+  Frame mehr, meldet `/track/latest` `found=false` statt einen alten Treffer
+  einzufrieren.
+- **Neue Config-Felder:** `hailo_input`, `hailo_hef_path`, `stale_after_seconds`,
+  `stream_max_width`. `host`-Default ist jetzt `0.0.0.0` (von außen erreichbar).
 
-## What was removed
-
-- `from visual import search` — **gone**
-- `from visual import start_search, get_result, cancel` — **gone**
-- The `__init__.py` package interface — **gone**
-- The `job_id` concept (UUID returned by `start_search`, polled with `get_result(job_id)`) — **gone**
-- `cancel(job_id)` — **replaced by** `stop()` (no job IDs needed anymore)
-- `VISION_STABLE_FRAMES` and `VISION_TIMEOUT` env variables — **gone** (no more one-shot detection with timeout)
-
-## What is new
-
-- **HTTP server** on `127.0.0.1:7995` (FastAPI), started via `python server.py`
-- **Five endpoints**: `POST /track/start`, `GET /track/latest`, `POST /track/stop`, `GET /health`, `GET /stream`. The first four are the tracking API you integrate against; `/stream` is an MJPEG video feed for the audio team's UI (see below).
-- **Python client** `visual_client.py` we ship with the repo
-- **Bounding-box size** in the result: `w` and `h`, in addition to `x`, `y` (all normalized 0–1)
-- **Continuous tracking** instead of one-shot detection — the detector runs in the background until you stop it
-- **Sliding window** of the last 8 frames smooths the output (default: 5 of 8 frames must match for `found=true`)
-- **Auto Hailo→YOLO fallback** — when `VISUAL_DETECTOR` is not set, the server tries Hailo first and falls back to YOLO on any error. `GET /health` returns `{"detector": "hailo"|"yolo"|"none"}` so you can verify which one's active.
-- **Configurable bind address** — `VISUAL_HOST` env variable, default `127.0.0.1`. Set to `0.0.0.0` for network access.
-- **Central config** (`config.py`) — all tuning parameters in one `VisualConfig` dataclass. Override per run via environment variables (see README for the full table).
-
-## Behavioral changes
-
-1. **No more one-shot search.** Previously `search({"name": "smartphone"})` blocked until the object was found or timed out. Now you call `start()`, then poll `latest()` in your main loop, then call `stop()` when done.
-2. **Result format changed.** Old: `{name, found, confidence, x, y}`. New: same fields plus `w`, `h`, plus a `status` field (`"running"` / `"idle"`).
-3. **`name` must be a valid COCO label** (e.g. `"cell phone"`, `"person"`, `"bottle"`). The previous version internally mapped colloquial terms (`"smartphone"`, `"handy"`) to COCO labels. **That mapping is gone** — the audio team handles label translation now.
-4. **The server must be running** when you call it. Either start it manually (`python server.py`) or have your controller process spawn it. There is no in-process API anymore.
-5. **Port changed from 8000 to 7995** — make sure your client uses the new default (or pass `base_url="http://127.0.0.1:7995"` explicitly).
-
-## Old code (delete this)
+## HTTP-API (für den Controller)
 
 ```python
-from visual import search, start_search, get_result, cancel
-
-# Old one-shot blocking call:
-result = search({"name": "smartphone"})
-if result["found"]:
-    laser.point_to(result["x"], result["y"])
-
-# Or old async pattern:
-job = start_search({"name": "smartphone"})
-while True:
-    r = get_result(job["job_id"])
-    if r["status"] == "done":
-        break
-    time.sleep(0.1)
-cancel(job["job_id"])
-```
-
-## New code (use this)
-
-```python
-from visual_client import VisualClient
-import time
-
-with VisualClient() as visual:                    # default: http://127.0.0.1:7995
-    visual.start("cell phone")                    # COCO label from audio team
-    while controller_running:
-        r = visual.latest()
-        if r["status"] == "running" and r["found"]:
-            laser.point_to(r["x"], r["y"])        # also r["w"], r["h"] for size
-        else:
-            laser.idle()
-        time.sleep(0.1)
-    # stop() is called automatically by the context manager
-```
-
-## Response format reference
-
-```python
-# Tracking off:
+# Tracking aus:
 {"status": "idle"}
 
-# Tracking running, nothing detected in current window:
+# läuft, nichts erkannt:
 {"status": "running", "name": "cell phone", "found": false,
  "confidence": 0.0, "x": null, "y": null, "w": null, "h": null}
 
-# Tracking running, object detected:
+# läuft, Treffer:
 {"status": "running", "name": "cell phone", "found": true,
  "confidence": 0.87, "x": 0.51, "y": 0.48, "w": 0.18, "h": 0.32}
 
 # Health:
-{"status": "ok", "detector": "hailo"}   # or "yolo" or "none"
+{"status": "ok", "detector": "hailo", "ready": true}   # detector: hailo|yolo|none
+```
+Alle Koordinaten normiert auf 0.0–1.0.
+
+## Migration (altes → neues)
+
+```python
+# ALT (entfällt):
+from visual import search
+result = search({"name": "smartphone"})
+
+# NEU:
+from visual_client import VisualClient
+import time
+
+with VisualClient() as visual:              # default http://127.0.0.1:7995
+    visual.start("cell phone")              # COCO-Label vom Audio-Team
+    while controller_running:
+        r = visual.latest()
+        if r["status"] == "running" and r["found"]:
+            laser.point_to(r["x"], r["y"])  # auch r["w"], r["h"]
+        else:
+            laser.idle()
+        time.sleep(0.1)
+    # stop() ruft der Context-Manager automatisch
 ```
 
-All coordinates are normalized to 0.0–1.0 (image fraction, not pixels).
+Wichtige Verhaltensänderungen gegenüber Sprint 1:
+1. **Kein One-Shot-`search()`** mehr — `start()`, dann `latest()` pollen, dann `stop()`.
+2. **Ergebnis** enthält zusätzlich `w`, `h` und ein `status`-Feld.
+3. **`name` muss ein gültiges COCO-Label sein** (`"cell phone"`, nicht
+   `"smartphone"`). Das Audio-Team mappt; `coco.yaml` ist die Source-of-Truth.
+4. **Der Server muss laufen** (`python server.py`) — keine In-Process-API mehr.
+5. **Port 7995** (vorher 8000).
 
-## Polling rate
+## Polling-Rate
 
-100ms is a good default. The sliding window aggregates the last 8 frames, so a new aggregated value comes in roughly every 250ms (Hailo) or 500ms (YOLO on a laptop). Polling faster doesn't hurt (it's idempotent and cheap), but won't give you fresher data.
+100 ms ist ein guter Default. Schneller schadet nicht (idempotent, billig),
+liefert aber keine frischeren Daten.
 
-## The `/stream` endpoint — for the audio team, not the controller
+## Der `/stream`-Endpoint — fürs Audio-Team, nicht den Controller
 
-`GET /stream` is a new endpoint that serves an **MJPEG live video feed** of the
-camera image with bounding boxes drawn on it. It exists so the **audio team**
-can embed the camera view in their UI. It is **not part of the tracking
-integration** — as the controller you do not need to call it, and it does not
-change anything about `/track/*`.
+`GET /stream` ist ein MJPEG-Video-Feed mit eingezeichneten Boxen, gedacht für die
+Audio-Team-Oberfläche. **Nicht Teil der Tracking-Integration** — als Controller
+müsst ihr ihn nicht aufrufen, und er ändert nichts an `/track/*`.
 
-A few things worth knowing anyway, since it shares the server:
+- Zeigt nur bei aktivem Tracking Boxen; sonst grauer Platzhalter.
+- Öffnet keine zweite Kamera (teilt sich Detector + Kamera mit dem Tracking).
+- Funktioniert mit Hailo **und** YOLO.
 
-- The stream only shows boxes/movement while tracking is active (`POST /track/start`).
-  Without active tracking it serves a grey placeholder frame.
-- It does **not** open a second camera — it reuses the frames the running
-  detector already produces. Tracking and stream share one camera.
-- **Current status — be aware:** `/stream` is **fully tested with the YOLO
-  detector** (laptop + webcam). The **Hailo path is a draft and not yet
-  verified on the Pi** — it depends on the still-open sprint task **T-20**.
-  If the server runs under Hailo, the stream *may* stay empty (grey
-  placeholder) until T-20 is done. **Tracking (`/track/*`) is not affected**
-  and works with Hailo as usual.
+Audio-Team: `tkinter_stream_example.py` und Abschnitt 10 in `Anleitung.md`.
 
-If the audio team wants to integrate it, point them at `tkinter_stream_example.py`
-and section 10 of `instruction.md`.
+## Was auf unserer Seite noch offen ist
 
-## Heads-up about your old `interface.py` wrapper
+- **Team-übergreifende Config-Datei** (alle Modul-Ports zentral): in Diskussion.
+  Die modulinterne Config (`config.py`) ist fertig.
 
-In the old setup you had a FastAPI wrapper (`/search/{item_name}`, `/cancel`) that called our Python functions internally. **Two things in there are now obsolete:**
+## Repo + Docs
 
-- `CONFIDENCE_THRESHOLD = 0.60` — confidence filtering now happens inside Visual (per-frame minimum + sliding-window vote). You don't need a second threshold on your side.
-- `TIMEOUT = 40 * 0.5s = 20s` — there's no one-shot detection anymore. Tracking runs until you call `stop()`. If you want a max-search duration, build it as a counter in your polling loop.
-
-**Open question:** do you still want to keep your own FastAPI wrapper as a layer (calling `VisualClient` internally), or call `VisualClient` directly from your main controller logic? Both work — the choice depends on your internal architecture, not ours. Let us know if you want to discuss.
-
-## Why we changed it
-
-The "sustained fire" requirement for the laser came in after Sprint 1. The laser needs continuous coordinate updates, not a single detection result. We considered:
-
-- Subprocess + IPC (pipe/socket) — rejected, hard to debug
-- Server-Sent Events / WebSocket — rejected, non-uniform with how other teams communicate
-- HTTP polling — chosen, uniform with other teams, easy to inspect with `curl`
-
-## What's still open on our side
-
-- The Hailo path is code-complete but **not yet live-tested on the Pi** (Sprint 3 task T-20). We'll go through that together at the next joint Pi session. The auto-fallback to YOLO is in place so the rollout still works if anything goes wrong.
-- `/stream` under Hailo is **not yet verified** — same dependency on T-20 (see the `/stream` section above). Under YOLO it is tested and works.
-- A central config file (instead of env variables) is already done (`config.py`); a *cross-team* config file (all module ports in one place) is still in discussion.
-
-## Testing it locally without the Pi
-
-If you want to verify your client code against a real running server before the Pi session:
-
-```bash
-VISUAL_DETECTOR=yolo python server.py        # uses your laptop webcam
-```
-
-Then point your code at `http://127.0.0.1:7995` and try with COCO labels like `"person"` (most reliable) or `"cell phone"`. A full step-by-step local test guide is in `TESTING.md`.
-
-## Repo + docs
-
-- `instruction.md` — **start here**, step-by-step guide for the controller team
-- `README.md` — full HTTP-API reference and config
-- `testing.md` — step-by-step local test guide (no Pi needed)
-- `sprints.md` — sprint history with architecture decisions
-- `visual_client.py` — ready-to-use Python client with docstrings
-- `live_e2e_test.py` — working end-to-end example you can read
-
-Ping me if anything is unclear — happy to walk through it on a call.
+- `Anleitung.md` — Quick Start fürs Controller-Team
+- `README.md` — volle API-Referenz und Config
+- `TESTING.md` — lokaler Test ohne Pi
+- `visual_client.py` — fertiger Python-Client
+- `live_e2e_test.py` — lauffähiges End-to-End-Beispiel
