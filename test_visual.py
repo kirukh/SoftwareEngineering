@@ -13,22 +13,23 @@ import threading
 import time
 
 import visual
-from visual_interface import VisionResult
+from visual_interface import TargetHolder, VisionResult
 
 
 # ------------------------------------------------------------------ Fake-Detektoren
 
 class _AlwaysFoundDetector:
-    def stream(self, name, on_frame, stop_event):
+    def stream(self, target: TargetHolder, on_frame, stop_event):
         while not stop_event.is_set():
-            on_frame(VisionResult(name, True, 0.9, 0.5, 0.5, 0.2, 0.3))
+            # Ziel pro Frame lesen, damit der Live-Switch sich im Ergebnis zeigt.
+            on_frame(VisionResult(target.get(), True, 0.9, 0.5, 0.5, 0.2, 0.3))
             time.sleep(0.01)
 
 
 class _NeverFoundDetector:
-    def stream(self, name, on_frame, stop_event):
+    def stream(self, target: TargetHolder, on_frame, stop_event):
         while not stop_event.is_set():
-            on_frame(VisionResult(name, False, 0.0))
+            on_frame(VisionResult(target.get(), False, 0.0))
             time.sleep(0.01)
 
 
@@ -112,6 +113,27 @@ def run_fake_tests() -> None:
     assert result["was_running"] is False
     print("  ✓ Stop ist idempotent")
 
+    trennlinie("Test 7: Live-Switch — Ziel wechseln ohne Detector-Neustart")
+    visual.set_detector(_AlwaysFoundDetector())
+    visual.start_tracking("cup")
+    assert _wait_until(lambda: visual.get_latest().get("found") is True)
+
+    thread_before = visual._tracking_thread
+    r = visual.start_tracking("bottle")
+    thread_after = visual._tracking_thread
+
+    assert r["status"] == "running" and r["name"] == "bottle"
+    # Kernaussage des Features: derselbe Thread läuft weiter, kein Neustart.
+    assert thread_before is thread_after, \
+        "Detector-Thread wurde neu gestartet — Live-Switch soll nur das Ziel tauschen"
+    # Window wurde geleert → Ergebnis trägt jetzt das neue Ziel.
+    assert _wait_until(lambda: visual.get_latest().get("name") == "bottle")
+    result = visual.get_latest()
+    print(f"  {result}")
+    assert result["name"] == "bottle"
+    visual.stop_tracking()
+    print("  ✓ Live-Switch tauscht nur das Ziel, kein Thread-Neustart")
+
 
 # ------------------------------------------------------------------ Server-Test
 
@@ -157,12 +179,23 @@ def run_server_tests() -> None:
         assert r["found"] is True
         assert r["w"] is not None and r["h"] is not None
 
-        trennlinie("Server-Test 4: stop()")
+        trennlinie("Server-Test 4: Live-Switch via erneutem start()")
+        print(f"  start: {client.start('bottle')}")
+        for _ in range(20):
+            r = client.latest()
+            if r.get("name") == "bottle":
+                break
+            time.sleep(0.1)
+        print(f"  latest: {r}")
+        assert r["name"] == "bottle"
+        print("  ✓ Ziel-Wechsel über die HTTP-API")
+
+        trennlinie("Server-Test 5: stop()")
         r = client.stop()
         print(f"  {r}")
         assert r["status"] == "stopped"
 
-        trennlinie("Server-Test 5: validation error (leerer name)")
+        trennlinie("Server-Test 6: validation error (leerer name)")
         # Direkter Test über interne Schicht — Pydantic-422 hat client.start nicht durchgelassen.
         import httpx
         r = httpx.post("http://127.0.0.1:8765/track/start", json={"name": "  "})
