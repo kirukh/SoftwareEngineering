@@ -1,0 +1,25 @@
+diff --git a/main.py b/main.py
+index 5cc12b1..f95c490 100644
+--- a/main.py
++++ b/main.py
+@@ -1,10 +1,20 @@
+ from pathlib import Path
++import os
+ import subprocess
+ import sys
+ 
+ ROOT = Path(__file__).resolve().parent
+ 
++# Navi2 (Antrieb) und Laserpointer (Servo) teilen sich EINEN Arduino über den
++# Gateway. Diese Variable wird an alle Unterprozesse vererbt: HardwareConfig.py
++# und Laserpointer/main.py posten dann an den Gateway statt direkt auf den
++# seriellen Port. (Voraussetzung: combined_firmware.ino ist geflasht.)
++os.environ.setdefault("ARDUINO_GATEWAY_URL", "http://127.0.0.1:8005")
++
+ services = [
++    # Gateway zuerst: einziger Besitzer des seriellen Ports, kein --reload
++    # (sonst würde der Port doppelt geöffnet).
++    (ROOT / "ArduinoGateway", [sys.executable, "-m", "uvicorn", "gateway:app","--host", "0.0.0.0", "--port", "8005"]),
+     (ROOT / "visual", [sys.executable, "server.py"]),
+     (ROOT / "Laserpointer", [sys.executable, "-m", "uvicorn", "main:app","--host", "0.0.0.0", "--reload", "--port", "8004"]),
+     (ROOT / "Interfaces", [sys.executable, "-m", "uvicorn", "controller:app","--host", "0.0.0.0", "--reload", "--port", "7979"]),

@@ -1,5 +1,25 @@
-/pyvenv.cfg
-/yolov8n.pt
-/hailort.log
-/.venv
-/__pycache__
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtuelle Umgebungen
+.venv/
+venv/
+ENV/
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+/visual/hailort.log
+/visual/pyvenv.cfg
+/visual/yolov8n.pt

@@ -1,0 +1,11 @@
+Terminal 1: Run Visual server: (localhost:7995)
+    1. cd .\visual\
+    2. $env:VISUAL_DETECTOR = "yolo"; python server.py
+
+Terminal 2: Run Controller: (localhost:8080)
+    1. cd .\Interfaces\FastAPI\ 
+    2. uvicorn main:app --reload --port 8080
+
+Terminal 3: Curl: (Turn camera on)
+    1. curl.exe -N -X POST http://localhost:8080/visual/search/person
+    2. curl.exe -N -X POST http://localhost:8080/visual/cancel

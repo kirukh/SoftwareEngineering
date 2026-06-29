@@ -1,0 +1,47 @@
+diff --git a/Navigation_2/ImplementationCode/HardwareConfig.py b/Navigation_2/ImplementationCode/HardwareConfig.py
+index 52d36c9..0677870 100644
+--- a/Navigation_2/ImplementationCode/HardwareConfig.py
++++ b/Navigation_2/ImplementationCode/HardwareConfig.py
+@@ -1,11 +1,19 @@
+ import serial
+ import time
+ import math
++import os
+ import logging
+ from serial.tools import list_ports
+ 
+ #Logging für bessere Debugging
+ logger = logging.getLogger(__name__)
++
++# Wenn gesetzt (z.B. "http://127.0.0.1:8005"), gehen Antriebsbefehle NICHT mehr
++# direkt auf den seriellen Port, sondern als HTTP-POST an den Arduino-Gateway.
++# So teilen sich Navi2 (Antrieb) und Laserpointer (Servo) denselben Arduino,
++# ohne den seriellen Port gleichzeitig öffnen zu müssen. Nicht gesetzt =
++# unverändertes Direkt-Serial-Verhalten (Abwärtskompatibel).
++GATEWAY_URL = os.environ.get("ARDUINO_GATEWAY_URL")
+ # Hardware Konstanten
+ x_center = 0.5
+ threshold = 0.05
+@@ -69,8 +77,20 @@ def init():
+         arduino = None
+         return True
+ def send_command(cmd):
+-    logger.info(f"SENDE BEFEHL: {cmd}") 
+-    
++    logger.info(f"SENDE BEFEHL: {cmd}")
++
++    # Gateway-Modus: Antriebsbefehl per HTTP an den Arduino-Gateway senden.
++    if GATEWAY_URL:
++        try:
++            import requests
++            r = requests.post(f"{GATEWAY_URL}/drive", json={"command": cmd}, timeout=20)
++            ok = r.status_code == 200
++            logger.info(f"[GATEWAY] {cmd} -> HTTP {r.status_code}")
++            return ok
++        except Exception as e:
++            logger.error(f"[GATEWAY] Fehler beim Senden von '{cmd}': {e}")
++            return False
++
+     if arduino is None:
+         logger.info(f"[SIMULATION] Befehl ausgeführt: {cmd}")
+         logger.info("[SIMULATION] DONE")

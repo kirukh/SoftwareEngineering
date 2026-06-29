@@ -1,0 +1,24 @@
+Verbindungen mit Arduino nano: 
+1.Navigation : (2 motortreiber DRV8825 + 2 ActMotoren 17Hs4412P1-3)
+-Motortreiber1: 
+Enable => GND
+M1 + RESET + SLEEP => 5v
+DIR => D2
+STEP => D3
+VMOT => +
+GND => -
+Motorkabeln :ROT+B2, BLUE+B1, GRÜN+A1, SCHWARZ+A2
+
+-Motortreiber2: 
+Enable => GND
+M1 + RESET + SLEEP => 5v
+DIR => D5
+STEP => D6
+VMOT => +
+GND => -
+Motorkabeln :ROT+B2, BLUE+B1, GRÜN+A1, SCHWARZ+A2
+2.Sensor (L3G4200D):
+GND => GND
+SDA => A4
+SCL => A5
+VCC => 5v

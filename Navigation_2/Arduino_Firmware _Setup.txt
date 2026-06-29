@@ -1,0 +1,22 @@
+# Arduino Firmware Setup
+
+This project uses PlatformIO to build and upload the Arduino firmware.
+
+## Requirements
+
+- PlatformIO Core or PlatformIO VS Code Extension
+- Arduino Nano (ATmega328P)
+
+---
+
+## PlatformIO Configuration
+
+The firmware is configured using the following `platformio.ini`:
+
+```ini
+[env:nanoatmega328new]
+platform = atmelavr
+board = nanoatmega328new
+framework = arduino
+upload_port = COM3
+upload_speed = 115200

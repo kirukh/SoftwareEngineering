@@ -1,0 +1,31 @@
+diff --git a/Interfaces/controller.py b/Interfaces/controller.py
+index 1178691..7c29f32 100644
+--- a/Interfaces/controller.py
++++ b/Interfaces/controller.py
+@@ -2,6 +2,13 @@ from fastapi import FastAPI
+ from pydantic import BaseModel
+ from fastapi import BackgroundTasks
+ import requests
++import os
++import time
++
++# Verzögerung (Sekunden), bevor der Roboter nach dem /start-Befehl loslegt.
++# Gibt der Person Zeit, das Handy wegzulegen / aus dem Bild zu gehen, bevor die
++# Suche startet (z.B. fürs Video). Per Env STARTUP_DELAY_SECONDS anpassbar.
++STARTUP_DELAY_SECONDS = float(os.environ.get("STARTUP_DELAY_SECONDS", "3"))
+ 
+ """ AUDIO """
+ 
+@@ -213,6 +220,12 @@ def ablauf(command_dict):
+ 
+     log = core_log()
+ 
++    # Kurze Verzögerung, damit man nach dem /start-Befehl noch in Position kommt
++    # (Handy weglegen / aus dem Bild gehen), bevor der Roboter zu drehen beginnt.
++    if STARTUP_DELAY_SECONDS > 0:
++        print(f"Warte {STARTUP_DELAY_SECONDS}s vor dem Start...")
++        time.sleep(STARTUP_DELAY_SECONDS)
++
+     state = "IDLE"
+ 
+     while True:

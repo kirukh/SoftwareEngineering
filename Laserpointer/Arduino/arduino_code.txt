@@ -1,0 +1,55 @@
+#include <Servo.h>
+
+const long BAUD_RATE = 57600;
+const int PAN_PIN = 9;
+const int TILT_PIN = 10;
+const int CENTER_ANGLE = 90;
+const int SMOOTH_STEP_DEGREES = 1;
+const int SMOOTH_STEP_DELAY_MS = 4;
+
+Servo pan;
+Servo tilt;
+
+void setup() {
+  Serial.begin(BAUD_RATE);
+  pan.attach(PAN_PIN);
+  tilt.attach(TILT_PIN);
+
+  pan.write(CENTER_ANGLE);
+  tilt.write(CENTER_ANGLE);
+}
+
+void moveServoSmooth(Servo &servo, int targetAngle) {
+  int currentAngle = servo.read();
+  int step = (targetAngle >= currentAngle) ? SMOOTH_STEP_DEGREES : -SMOOTH_STEP_DEGREES;
+
+  for (int angle = currentAngle; angle != targetAngle; angle += step) {
+    servo.write(angle);
+    delay(SMOOTH_STEP_DELAY_MS);
+  }
+  servo.write(targetAngle);
+}
+
+void writeServo(char axis, int angle) {
+  int safeAngle = constrain(angle, 0, 180);
+
+  if (axis == 'X') {
+    moveServoSmooth(pan, safeAngle);
+  } else if (axis == 'Y') {
+    moveServoSmooth(tilt, safeAngle);
+  }
+}
+
+void loop() {
+  if (Serial.available() == 0) {
+    return;
+  }
+
+  char axis = Serial.read();
+  if (axis != 'X' && axis != 'Y') {
+    return;
+  }
+
+  int angle = Serial.parseInt();
+  writeServo(axis, angle);
+}
